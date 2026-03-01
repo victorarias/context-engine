@@ -72,7 +72,7 @@ describe("MCP Server HTTP E2E", () => {
 
   it("serves MCP tools over streamable HTTP", async () => {
     const { tools } = await client.listTools();
-    expect(tools.length).toBeGreaterThanOrEqual(9);
+    expect(tools.length).toBeGreaterThanOrEqual(8);
 
     const status = await client.callTool({
       name: "status",
@@ -83,16 +83,16 @@ describe("MCP Server HTTP E2E", () => {
     expect(statusText).toContain("Indexing:");
     expect(statusText.includes("Indexing: idle") || statusText.includes("Indexing: in progress")).toBe(true);
 
-    const sandbox = await client.callTool({
-      name: "code_sandbox",
+    const execute = await client.callTool({
+      name: "execute",
       arguments: {
-        code: "output = { ok: (input as any).n + 1 };",
-        input: { n: 1 },
+        code: "output = [{ tool: 'status', args: {} }];",
       },
     });
 
-    const sandboxText = (sandbox.content[0] as { type: "text"; text: string }).text;
-    expect(sandboxText).toContain("\"ok\": true");
+    const executeText = (execute.content[0] as { type: "text"; text: string }).text;
+    expect(executeText).toContain("\"ok\": true");
+    expect(executeText).toContain("\"callsExecuted\": 1");
   });
 });
 

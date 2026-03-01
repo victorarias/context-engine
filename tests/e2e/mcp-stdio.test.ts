@@ -79,10 +79,9 @@ describe("MCP Server E2E", () => {
     expect(names).toContain("get_file_summary");
     expect(names).toContain("get_recent_changes");
     expect(names).toContain("get_dependencies");
-    expect(names).toContain("search_docs");
     expect(names).toContain("status");
-    expect(names).toContain("code_sandbox");
-    expect(names.length).toBe(9);
+    expect(names).toContain("execute");
+    expect(names.length).toBe(8);
   });
 
   it("semantic_search returns text content (not crash)", async () => {
@@ -158,18 +157,6 @@ describe("MCP Server E2E", () => {
     expect(text).toContain("Dependencies");
   });
 
-  it("search_docs returns indexed documentation", async () => {
-    const result = (await client.callTool({
-      name: "search_docs",
-      arguments: { query: "getting started" },
-    })) as CallToolResult;
-
-    expect(result.content).toBeDefined();
-    const text = (result.content[0] as { type: "text"; text: string }).text;
-    expect(text).toContain("Context Engine documentation");
-    expect(text).toContain("getting started");
-  });
-
   it("status returns engine state", async () => {
     const result = (await client.callTool({
       name: "status",
@@ -182,19 +169,20 @@ describe("MCP Server E2E", () => {
     expect(text).toContain("Embedding model");
   });
 
-  it("code_sandbox executes ts snippets with read-only input", async () => {
+  it("execute runs scripted MCP tool calls", async () => {
     const result = (await client.callTool({
-      name: "code_sandbox",
+      name: "execute",
       arguments: {
-        code: "output = { doubled: (input as any).value * 2 };",
-        input: { value: 21 },
+        code: "output = [{ tool: 'find_files', args: { pattern: '*.ts' } }];",
       },
     })) as CallToolResult;
 
     expect(result.content).toBeDefined();
     const text = (result.content[0] as { type: "text"; text: string }).text;
     expect(text).toContain("\"ok\": true");
-    expect(text).toContain("\"doubled\": 42");
+    expect(text).toContain("\"callsExecuted\": 1");
+    expect(text).toContain("\"tool\": \"find_files\"");
+    expect(text).toContain(".ts");
   });
 
   it("semantic_search with limit option works", async () => {

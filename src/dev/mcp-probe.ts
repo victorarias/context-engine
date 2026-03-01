@@ -15,8 +15,7 @@ const EXPECTED_TOOLS = [
   "get_file_summary",
   "get_recent_changes",
   "get_dependencies",
-  "search_docs",
-  "code_sandbox",
+  "execute",
   "status",
 ] as const;
 

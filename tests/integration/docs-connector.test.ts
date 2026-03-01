@@ -14,7 +14,7 @@ describe("Docs connector", () => {
     }
   });
 
-  it("indexes configured docs and returns search_docs results", async () => {
+  it("indexes configured docs and returns doc search results", async () => {
     const tmp = TempDir.create("ce-docs");
     dirs.push(tmp);
 

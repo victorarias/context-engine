@@ -41,8 +41,7 @@ bun run src/cli.ts reindex
 `bun run mcp` (`serve`) now performs an initial index and (by default) starts the worktree-aware watcher.
 Pass a custom config/path with `bun run mcp -- ./path/to/context-engine.json`.
 `get_recent_changes` now returns real git commit/file history for indexed git roots.
-`search_docs` now returns real matches from configured documentation sources.
-`code_sandbox` runs TypeScript snippets in QuickJS WASM isolation with timeout protection.
+`execute` runs isolated TypeScript "code mode" snippets that emit scripted MCP tool calls.
 HTTP MCP transport is supported via `server.transport = "http"`.
 
 ## Config
@@ -182,7 +181,7 @@ bun run mcp:probe -- --config ./context-engine.json --step-timeout-ms 8000
 - `src/sources/local-fs.ts` — local filesystem scanner
 - `src/sources/git-worktree.ts` — git worktree detection + HEAD manifest parsing
 - `src/sources/git-history.ts` — git log connector used by `get_recent_changes`
-- `src/sources/doc-fetcher.ts` — docs fetch + extraction used by `search_docs`
+- `src/sources/doc-fetcher.ts` — docs fetch + extraction used by docs indexing pipeline
 - `src/server/transports.ts` — STDIO + Streamable HTTP transports
 - `src/server/tools/code-sandbox.ts` — isolated TypeScript sandbox runner
 

@@ -30,7 +30,7 @@ then exposes semantic search and code intelligence tools to any MCP-compatible A
 ├──────────────────────────────────────────────────────────────┤
 │                      Tool Router                              │
 │  semantic_search · find_files · get_symbols · get_file_summary│
-│  get_recent_changes · get_dependencies · search_docs          │
+│  get_recent_changes · get_dependencies · execute              │
 ├──────────────────────────────────────────────────────────────┤
 │                     Query Engine                              │
 │  ┌─────────────┐  ┌──────────────┐  ┌─────────────────┐     │
@@ -766,7 +766,7 @@ M8: Hardening            Security layer + code sandbox + crash recovery + polish
   - scanner now uses git-compatible blob hashing and excludes `.git` + secret files
   - worktree-aware polling watcher integrated (`src/engine/watcher.ts`) with debounce + safety ignores
   - git history connector integrated (`src/sources/git-history.ts` + `ContextEngine.getRecentChanges`)
-  - docs connector integrated (`src/sources/doc-fetcher.ts` + indexed `search_docs`)
+  - docs connector integrated (`src/sources/doc-fetcher.ts` + indexed documentation chunks)
   - branch-isolation + dedup + watcher + history + docs tests added
 - M7 completed:
   - reranker integrated (`src/engine/reranker.ts`) with vector/symbol/path/recency fusion
@@ -774,7 +774,7 @@ M8: Hardening            Security layer + code sandbox + crash recovery + polish
   - eval runner + differential semantic-vs-ripgrep checks added
 - M8 completed:
   - path jail + secret denylist integrated (`src/storage/security.ts`, scanner + file tools)
-  - `code_sandbox` tool added with QuickJS WASM execution + timeout guard
+  - `execute` tool added with QuickJS WASM execution + timeout guard
   - Streamable HTTP transport implemented (`src/server/transports.ts`) with HTTP E2E coverage
   - recovery/repair CLI commands added (`reindex`, `doctor --fix`)
 - Test suite status: `bun test` green (89 passing).

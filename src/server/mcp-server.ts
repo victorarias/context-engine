@@ -56,6 +56,176 @@ async function withToolLogging<T>(toolName: string, args: unknown, fn: () => Pro
   }
 }
 
+const SCRIPTABLE_TOOL_NAMES = [
+  "semantic_search",
+  "find_files",
+  "get_symbols",
+  "get_file_summary",
+  "get_recent_changes",
+  "get_dependencies",
+  "status",
+] as const;
+
+type ScriptableToolName = (typeof SCRIPTABLE_TOOL_NAMES)[number];
+
+type ScriptedToolCall = {
+  tool: ScriptableToolName;
+  args: Record<string, unknown>;
+};
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === "object" && !Array.isArray(value);
+}
+
+function isScriptableToolName(value: string): value is ScriptableToolName {
+  return (SCRIPTABLE_TOOL_NAMES as readonly string[]).includes(value);
+}
+
+function parseScriptedCalls(raw: unknown, maxCalls: number): ScriptedToolCall[] {
+  const parsedMaxCalls = Number.isFinite(maxCalls) ? Math.max(1, Math.floor(maxCalls)) : 8;
+  const source = Array.isArray(raw)
+    ? raw
+    : (isRecord(raw) && Array.isArray(raw.calls) ? raw.calls : null);
+
+  if (!source) {
+    throw new Error(
+      "execute output must be an array of tool calls or { calls: [...] }. " +
+      "Example: output = [{ tool: 'find_files', args: { pattern: '*.ts' } }];",
+    );
+  }
+
+  if (source.length === 0) {
+    throw new Error("execute output.calls must contain at least 1 tool call.");
+  }
+
+  if (source.length > parsedMaxCalls) {
+    throw new Error(`execute output has ${source.length} calls, exceeding maxCalls=${parsedMaxCalls}.`);
+  }
+
+  const calls: ScriptedToolCall[] = [];
+
+  for (let i = 0; i < source.length; i++) {
+    const entry = source[i];
+    if (!isRecord(entry)) {
+      throw new Error(`Call #${i + 1} must be an object.`);
+    }
+
+    const tool = entry.tool;
+    if (typeof tool !== "string" || !isScriptableToolName(tool)) {
+      throw new Error(
+        `Call #${i + 1} has unsupported tool '${String(tool)}'. ` +
+        `Allowed tools: ${SCRIPTABLE_TOOL_NAMES.join(", ")}.`,
+      );
+    }
+
+    const args = isRecord(entry.args) ? entry.args : {};
+    calls.push({ tool, args });
+  }
+
+  return calls;
+}
+
+function optionalString(value: unknown): string | undefined {
+  return typeof value === "string" ? value : undefined;
+}
+
+function optionalNumber(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function requiredString(value: unknown, field: string): string {
+  if (typeof value === "string" && value.trim()) {
+    return value;
+  }
+
+  throw new Error(`Missing required string field '${field}'.`);
+}
+
+function formatSearchResults(results: Awaited<ReturnType<Engine["search"]>>): string {
+  if (results.length === 0) {
+    return "No results found.";
+  }
+
+  return results
+    .map((r, i) => {
+      const header = `### ${i + 1}. ${r.filePath}:${r.startLine}-${r.endLine}` +
+        (r.symbolName ? ` (${r.symbolKind}: ${r.symbolName})` : "") +
+        ` [score: ${r.score.toFixed(3)}]`;
+      return `${header}\n\`\`\`${r.language}\n${r.content}\n\`\`\``;
+    })
+    .join("\n\n");
+}
+
+function formatStatus(status: Awaited<ReturnType<Engine["status"]>>): string {
+  const lines = [
+    `Indexing: ${status.indexing ? "in progress" : "idle"}`,
+    `Embedding model: ${status.embeddingModel}`,
+    `Worker: ${status.workerBusy ? "busy" : "idle"}`,
+    `Repos: ${status.repos.length === 0 ? "(none indexed)" : ""}`,
+  ];
+
+  for (const repo of status.repos) {
+    lines.push(`  ${repo.path} — ${repo.filesIndexed} files, ${repo.chunksStored} chunks`);
+  }
+
+  return lines.join("\n");
+}
+
+async function executeScriptedCall(engine: Engine, call: ScriptedToolCall): Promise<string> {
+  switch (call.tool) {
+    case "semantic_search": {
+      const query = requiredString(call.args.query, "query");
+      const limit = optionalNumber(call.args.limit);
+      const worktreeId = optionalString(call.args.worktreeId);
+      const results = await engine.search(query, { limit, worktreeId });
+      return formatSearchResults(results);
+    }
+
+    case "find_files": {
+      const pattern = requiredString(call.args.pattern, "pattern");
+      const worktreeId = optionalString(call.args.worktreeId);
+      const files = await engine.findFiles(pattern, { worktreeId });
+      return files.length === 0 ? "No files found." : files.join("\n");
+    }
+
+    case "get_symbols": {
+      const symbols = await engine.getSymbols({
+        name: optionalString(call.args.name),
+        filePath: optionalString(call.args.filePath),
+        kind: optionalString(call.args.kind),
+      });
+
+      if (symbols.length === 0) {
+        return "No symbols found.";
+      }
+
+      return symbols
+        .map((s) => `${s.kind} ${s.name} — ${s.filePath}:${s.startLine}-${s.endLine}`)
+        .join("\n");
+    }
+
+    case "get_file_summary": {
+      const path = requiredString(call.args.path, "path");
+      return engine.getFileSummary(path);
+    }
+
+    case "get_recent_changes": {
+      const query = optionalString(call.args.query);
+      return engine.getRecentChanges(query);
+    }
+
+    case "get_dependencies": {
+      const path = requiredString(call.args.path, "path");
+      return engine.getDependencies(path);
+    }
+
+    case "status": {
+      const status = await engine.status();
+      return formatStatus(status);
+    }
+  }
+}
+
 /**
  * Create and configure the MCP server with all tools wired to the engine.
  */
@@ -81,11 +251,12 @@ export function createMcpServer(engine: Engine): McpServer {
 
   server.registerTool("semantic_search", {
     description:
-      "Search the codebase using natural language. Returns relevant code snippets " +
-      "ranked by semantic similarity. Use this to find code related to a concept, " +
-      "feature, or question.",
+      "What: Natural-language concept search over indexed code chunks. " +
+      "Use when: you know behavior/intent but not exact identifiers. " +
+      "Prefer over: grep for exploratory discovery. " +
+      "Not for: exact literal matches or usage counting.",
     inputSchema: {
-      query: z.string().describe("Natural language search query"),
+      query: z.string().describe("Natural language query (e.g. 'how auth tokens are refreshed')"),
       limit: z.number().optional().default(10).describe("Max results to return"),
       worktreeId: z.string().optional().describe("Scope search to a specific worktree"),
     },
@@ -95,28 +266,17 @@ export function createMcpServer(engine: Engine): McpServer {
       worktreeId: args.worktreeId,
     });
 
-    if (results.length === 0) {
-      return { content: [{ type: "text", text: "No results found." }] };
-    }
-
-    const text = results
-      .map((r, i) => {
-        const header = `### ${i + 1}. ${r.filePath}:${r.startLine}-${r.endLine}` +
-          (r.symbolName ? ` (${r.symbolKind}: ${r.symbolName})` : "") +
-          ` [score: ${r.score.toFixed(3)}]`;
-        return `${header}\n\`\`\`${r.language}\n${r.content}\n\`\`\``;
-      })
-      .join("\n\n");
-
-    return { content: [{ type: "text", text }] };
+    return { content: [{ type: "text", text: formatSearchResults(results) }] };
   }));
 
   // ─── find_files ───────────────────────────────────────────────────
 
   server.registerTool("find_files", {
     description:
-      "Find files matching a glob pattern or name substring. " +
-      "Returns file paths. Use this to locate specific files.",
+      "What: Find indexed files by glob or substring (optionally scoped by worktree). " +
+      "Use when: you want fast discovery constrained to the indexed/worktree-visible set. " +
+      "Prefer over: filesystem glob when index scope matters. " +
+      "Not for: searching file contents.",
     inputSchema: {
       pattern: z.string().describe("Glob pattern or file name substring (e.g. '*.ts', 'auth')"),
       worktreeId: z.string().optional().describe("Scope to a specific worktree"),
@@ -137,8 +297,10 @@ export function createMcpServer(engine: Engine): McpServer {
 
   server.registerTool("get_symbols", {
     description:
-      "Find symbol definitions (functions, classes, interfaces, types) by name or file. " +
-      "Returns symbol locations with line numbers.",
+      "What: Lookup symbol definitions (function/class/interface/type) by name, kind, or file. " +
+      "Use when: you need definition locations quickly. " +
+      "Prefer over: grep for definition lookups. " +
+      "Not for: finding all usages/call-sites.",
     inputSchema: {
       name: z.string().optional().describe("Symbol name (partial match)"),
       filePath: z.string().optional().describe("File path to list symbols from"),
@@ -162,8 +324,10 @@ export function createMcpServer(engine: Engine): McpServer {
 
   server.registerTool("get_file_summary", {
     description:
-      "Get a summary of a file: its exports, key symbols, purpose, and relationships. " +
-      "Cheaper than reading the whole file.",
+      "What: Fast structural summary of an indexed file (chunks + top symbols). " +
+      "Use when: triaging large/unfamiliar files. " +
+      "Prefer over: opening full source immediately. " +
+      "Not for: line-level logic review.",
     inputSchema: {
       path: z.string().describe("File path to summarize"),
     },
@@ -176,8 +340,10 @@ export function createMcpServer(engine: Engine): McpServer {
 
   server.registerTool("get_recent_changes", {
     description:
-      "Get recent git changes, optionally filtered by a query. " +
-      "Returns commit messages and changed files.",
+      "What: Summarize recent commits and touched files across indexed git roots (optionally filtered). " +
+      "Use when: you need quick historical context around a feature/topic. " +
+      "Prefer over: raw git log for fast orientation. " +
+      "Not for: exact patch/blame-level inspection.",
     inputSchema: {
       query: z.string().optional().describe("Filter changes related to this topic"),
     },
@@ -190,7 +356,10 @@ export function createMcpServer(engine: Engine): McpServer {
 
   server.registerTool("get_dependencies", {
     description:
-      "Get the import/dependency graph for a file. Shows what it imports and what imports it.",
+      "What: Extract direct import dependencies from one file (TS/JS/Python patterns). " +
+      "Use when: scoping a refactor and understanding what this file depends on. " +
+      "Prefer over: manual import scanning. " +
+      "Not for: reverse dependency or full transitive graph analysis.",
     inputSchema: {
       path: z.string().describe("File path to analyze dependencies for"),
     },
@@ -199,51 +368,54 @@ export function createMcpServer(engine: Engine): McpServer {
     return { content: [{ type: "text", text: deps }] };
   }));
 
-  // ─── search_docs ──────────────────────────────────────────────────
+  // ─── execute ─────────────────────────────────────────────────────
 
-  server.registerTool("search_docs", {
+  server.registerTool("execute", {
     description:
-      "Search indexed documentation (external URLs configured in context-engine.json). " +
-      "Returns relevant doc snippets.",
+      "What: Code mode for batched MCP tool orchestration via TypeScript-generated call plans. " +
+      "Use when: a task needs multi-step/fan-out queries in one round trip. " +
+      "Prefer over: many sequential tool calls for repeatable workflows. " +
+      "Not for: arbitrary host scripting or side effects (no filesystem/network/process access).",
     inputSchema: {
-      query: z.string().describe("Search query for documentation"),
-    },
-  }, async (args) => withToolLogging("search_docs", args, async () => {
-    const results = await engine.searchDocs(args.query);
-
-    if (results.length === 0) {
-      return { content: [{ type: "text", text: "No documentation results found." }] };
-    }
-
-    const text = results
-      .map((r, i) => `### ${i + 1}. ${r.filePath}\n${r.content}`)
-      .join("\n\n");
-
-    return { content: [{ type: "text", text }] };
-  }));
-
-  // ─── code_sandbox ────────────────────────────────────────────────
-
-  server.registerTool("code_sandbox", {
-    description:
-      "Run small TypeScript snippets in an isolated VM context with read-only input. " +
-      "Set `output` in your code to return data.",
-    inputSchema: {
-      code: z.string().describe("TypeScript code to execute. Assign final value to `output`."),
+      code: z.string().describe(
+        "TypeScript plan builder. Assign `output` to an array or { calls: [...] } where each call is { tool, args }. " +
+        "Example: output = [{ tool: 'find_files', args: { pattern: '*.ts' } }, { tool: 'get_symbols', args: { name: 'Auth' } }]. " +
+        "Allowed tools: semantic_search, find_files, get_symbols, get_file_summary, get_recent_changes, get_dependencies, status.",
+      ),
       input: z.unknown().optional().describe("Read-only input object available as `input` in sandbox."),
-      timeoutMs: z.number().optional().default(5000).describe("Execution timeout in milliseconds."),
+      timeoutMs: z.number().optional().default(5000).describe("Sandbox execution timeout in milliseconds."),
+      maxCalls: z.number().optional().default(8).describe("Max number of scripted tool calls to execute."),
     },
-  }, async (args) => withToolLogging("code_sandbox", args, async () => {
+  }, async (args) => withToolLogging("execute", args, async () => {
     try {
-      const result = await runCodeSandbox(args.code, {
+      const scriptOutput = await runCodeSandbox(args.code, {
         input: args.input,
         timeoutMs: args.timeoutMs,
       });
 
+      const calls = parseScriptedCalls(scriptOutput, args.maxCalls);
+      const results: Array<{
+        index: number;
+        tool: ScriptableToolName;
+        args: Record<string, unknown>;
+        text: string;
+      }> = [];
+
+      for (let i = 0; i < calls.length; i++) {
+        const call = calls[i];
+        const text = await executeScriptedCall(engine, call);
+        results.push({
+          index: i + 1,
+          tool: call.tool,
+          args: call.args,
+          text,
+        });
+      }
+
       return {
         content: [{
           type: "text",
-          text: JSON.stringify({ ok: true, result }, null, 2),
+          text: JSON.stringify({ ok: true, callsExecuted: results.length, results }, null, 2),
         }],
       };
     } catch (error) {
@@ -259,19 +431,14 @@ export function createMcpServer(engine: Engine): McpServer {
   // ─── status ───────────────────────────────────────────────────────
 
   server.registerTool("status", {
-    description: "Get the current status of the context engine: indexing progress, repos, worker state.",
+    description:
+      "What: Engine readiness snapshot (indexing state, worker activity, model warnings, repo stats). " +
+      "Use when: results look stale/empty or tool output is surprising. " +
+      "Prefer over: guessing engine freshness. " +
+      "Not for: code discovery.",
   }, async () => withToolLogging("status", {}, async () => {
     const s = await engine.status();
-    const lines = [
-      `Indexing: ${s.indexing ? "in progress" : "idle"}`,
-      `Embedding model: ${s.embeddingModel}`,
-      `Worker: ${s.workerBusy ? "busy" : "idle"}`,
-      `Repos: ${s.repos.length === 0 ? "(none indexed)" : ""}`,
-    ];
-    for (const r of s.repos) {
-      lines.push(`  ${r.path} — ${r.filesIndexed} files, ${r.chunksStored} chunks`);
-    }
-    return { content: [{ type: "text", text: lines.join("\n") }] };
+    return { content: [{ type: "text", text: formatStatus(s) }] };
   }));
 
   return server;

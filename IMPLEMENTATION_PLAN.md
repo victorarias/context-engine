@@ -8,7 +8,7 @@ This plan operationalizes `ARCHITECTURE.md` into execution-ready work.
 
 - **M1 (Walking Skeleton): ✅ Complete**
   - MCP server + STDIO transport live
-  - 9 tools registered and callable (including `code_sandbox`)
+  - 8 tools registered and callable (including `execute`)
   - CLI commands (`serve`, `index`, `status`) implemented
   - E2E MCP tests passing
 - **M2 (Storage): ✅ Complete**
@@ -45,7 +45,7 @@ This plan operationalizes `ARCHITECTURE.md` into execution-ready work.
   - Search visibility now resolves by worktree manifest + dirty overlay (overlay wins)
   - Worktree-aware polling watcher integrated with debounce + safety ignores (`src/engine/watcher.ts`)
   - Git history connector implemented (`src/sources/git-history.ts` + `get_recent_changes`)
-  - Docs connector implemented (`src/sources/doc-fetcher.ts` + real `search_docs`)
+  - Docs connector implemented (`src/sources/doc-fetcher.ts` + indexed doc chunks)
 - **M7 (Search quality + eval): ✅ Complete**
   - Reranker integrated (`src/engine/reranker.ts`) with score fusion (vector + symbol/path + recency)
   - Golden query set added (`tests/eval/golden-queries.json`)
@@ -54,7 +54,7 @@ This plan operationalizes `ARCHITECTURE.md` into execution-ready work.
 - **M8 (Hardening + security): ✅ Complete**
   - Path jail + secret denylist implemented (`src/storage/security.ts`, scanner + file tools integrated)
   - Streamable HTTP transport implemented (`src/server/transports.ts`, `tests/e2e/mcp-http.test.ts`)
-  - Code sandbox tool added (`code_sandbox`, QuickJS WASM isolated execution)
+  - Code sandbox tool added (`execute`, QuickJS WASM isolated execution)
   - Recovery commands added (`reindex`, `doctor --fix`) and status output polished
 
 Validation status (latest):
@@ -82,7 +82,7 @@ Validation status (latest):
 
 ### Tasks
 - [x] Create server bootstrap + STDIO transport
-- [x] Register tool set with schemas + handlers (now 9 tools including `code_sandbox`)
+- [x] Register tool set with schemas + handlers (now 8 tools including `execute`)
 - [x] Add config loader with defaults/validation
 - [x] Add stub engine interface used by all tools
 - [x] Add CLI commands: `serve`, `index`, `status`
@@ -216,7 +216,7 @@ Validation status (latest):
 ### Tasks
 - [x] Implement path jail enforcement in all path-taking tools
 - [x] Add hard secret-file denylist enforcement
-- [x] Implement isolated sandbox runner with strict timeout (`code_sandbox` QuickJS WASM)
+- [x] Implement isolated sandbox runner with strict timeout (`execute` QuickJS WASM)
 - [x] Add crash recovery command + corruption detection/rebuild flow (`reindex`, `doctor --fix`)
 - [x] Add Streamable HTTP transport
 - [x] Add status/progress polish
