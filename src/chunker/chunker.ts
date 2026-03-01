@@ -15,7 +15,7 @@ export class HybridChunker implements Chunker {
   ) {}
 
   async warmup(): Promise<void> {
-    await this.astChunker.warmupTreeSitter(["typescript", "javascript", "python"]);
+    await this.astChunker.warmupTreeSitter(["typescript", "javascript", "python", "go", "rust"]);
   }
 
   getWarnings(): string[] {

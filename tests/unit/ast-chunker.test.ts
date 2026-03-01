@@ -52,6 +52,79 @@ def authenticate_user(email, password):
     expect(symbols).toContain("function:create_session");
     expect(symbols).toContain("function:authenticate_user");
   });
+
+  it("extracts Go symbols", () => {
+    const chunker = new AstChunker({ preferTreeSitter: false });
+    const source = `
+package auth
+
+type SessionManager struct{}
+type Runner interface { Run() }
+
+func NewSessionManager() *SessionManager { return &SessionManager{} }
+func (s *SessionManager) Start() {}
+`;
+
+    const chunks = chunker.chunk(source, "src/auth.go", "go", "repo1");
+    const symbols = chunks.map((c) => `${c.symbolKind}:${c.symbolName}`);
+
+    expect(symbols).toContain("class:SessionManager");
+    expect(symbols).toContain("interface:Runner");
+    expect(symbols).toContain("function:NewSessionManager");
+    expect(symbols).toContain("method:Start");
+
+    const method = chunks.find((c) => c.symbolKind === "method" && c.symbolName === "Start");
+    expect(method?.parentSymbol).toBe("SessionManager");
+  });
+
+  it("extracts Rust symbols", () => {
+    const chunker = new AstChunker({ preferTreeSitter: false });
+    const source = `
+pub struct SessionManager;
+pub trait Runner { fn run(&self); }
+
+impl SessionManager {
+  pub fn start(&self) {}
+}
+
+pub fn new_manager() -> SessionManager { SessionManager }
+`;
+
+    const chunks = chunker.chunk(source, "src/auth.rs", "rust", "repo1");
+    const symbols = chunks.map((c) => `${c.symbolKind}:${c.symbolName}`);
+
+    expect(symbols).toContain("class:SessionManager");
+    expect(symbols).toContain("interface:Runner");
+    expect(symbols).toContain("function:start");
+    expect(symbols).toContain("function:new_manager");
+  });
+
+  it("extracts Kotlin symbols", () => {
+    const chunker = new AstChunker({ preferTreeSitter: false });
+    const source = `
+class SessionManager {
+  fun start() {}
+}
+
+interface Runner {
+  fun run()
+}
+
+typealias SessionId = String
+
+fun createManager(): SessionManager = SessionManager()
+`;
+
+    const chunks = chunker.chunk(source, "src/auth.kt", "kotlin", "repo1");
+    const symbols = chunks.map((c) => `${c.symbolKind}:${c.symbolName}`);
+
+    expect(symbols).toContain("class:SessionManager");
+    expect(symbols).toContain("interface:Runner");
+    expect(symbols).toContain("type:SessionId");
+    expect(symbols).toContain("function:start");
+    expect(symbols).toContain("function:run");
+    expect(symbols).toContain("function:createManager");
+  });
 });
 
 describe("HybridChunker", () => {

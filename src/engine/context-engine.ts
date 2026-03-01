@@ -845,12 +845,33 @@ function extractSymbols(content: string, filePath: string, repoId: string): Symb
   const symbols: SymbolInfo[] = [];
 
   const patterns: Array<{ regex: RegExp; kind: SymbolInfo["kind"]; group: number }> = [
+    // TS/JS
     { regex: /^\s*(?:export\s+)?function\s+([A-Za-z_$][\w$]*)\s*\(/gm, kind: "function", group: 1 },
     { regex: /^\s*(?:export\s+)?class\s+([A-Za-z_$][\w$]*)/gm, kind: "class", group: 1 },
     { regex: /^\s*(?:export\s+)?interface\s+([A-Za-z_$][\w$]*)/gm, kind: "interface", group: 1 },
     { regex: /^\s*(?:export\s+)?type\s+([A-Za-z_$][\w$]*)\s*=/gm, kind: "type", group: 1 },
+
+    // Python
     { regex: /^\s*def\s+([A-Za-z_][\w]*)\s*\(/gm, kind: "function", group: 1 },
     { regex: /^\s*class\s+([A-Za-z_][\w]*)/gm, kind: "class", group: 1 },
+
+    // Go
+    { regex: /^\s*func\s+([A-Za-z_][\w]*)\s*\(/gm, kind: "function", group: 1 },
+    { regex: /^\s*func\s*\(\s*[A-Za-z_][\w]*\s+\*?[A-Za-z_][\w]*\s*\)\s+([A-Za-z_][\w]*)\s*\(/gm, kind: "method", group: 1 },
+    { regex: /^\s*type\s+([A-Za-z_][\w]*)\s+struct\b/gm, kind: "class", group: 1 },
+    { regex: /^\s*type\s+([A-Za-z_][\w]*)\s+interface\b/gm, kind: "interface", group: 1 },
+
+    // Rust
+    { regex: /^\s*(?:pub\s+)?fn\s+([A-Za-z_][\w]*)\s*\(/gm, kind: "function", group: 1 },
+    { regex: /^\s*(?:pub\s+)?struct\s+([A-Za-z_][\w]*)\b/gm, kind: "class", group: 1 },
+    { regex: /^\s*(?:pub\s+)?trait\s+([A-Za-z_][\w]*)\b/gm, kind: "interface", group: 1 },
+    { regex: /^\s*(?:pub\s+)?enum\s+([A-Za-z_][\w]*)\b/gm, kind: "enum", group: 1 },
+
+    // Kotlin
+    { regex: /^\s*(?:data\s+|sealed\s+|open\s+|abstract\s+)?class\s+([A-Za-z_][\w]*)\b/gm, kind: "class", group: 1 },
+    { regex: /^\s*(?:sealed\s+)?interface\s+([A-Za-z_][\w]*)\b/gm, kind: "interface", group: 1 },
+    { regex: /^\s*typealias\s+([A-Za-z_][\w]*)\b/gm, kind: "type", group: 1 },
+    { regex: /^\s*(?:suspend\s+)?fun\s+(?:[A-Za-z_][\w]*\.)?([A-Za-z_][\w]*)\s*\(/gm, kind: "function", group: 1 },
   ];
 
   for (const pattern of patterns) {

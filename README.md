@@ -175,7 +175,7 @@ bun run mcp:probe -- --config ./context-engine.json --step-timeout-ms 8000
 - `src/storage/write-log.ts` — dual-write WAL
 - `src/storage/security.ts` — path jail + secret denylist helpers
 - `src/chunker/text-chunker.ts` — sliding window chunker
-- `src/chunker/ast-chunker.ts` — AST-aware symbol chunking (TS/JS/Python)
+- `src/chunker/ast-chunker.ts` — AST-aware symbol chunking (TS/JS/Python/Go/Rust/Kotlin)
 - `src/chunker/tree-sitter-loader.ts` — tree-sitter WASM grammar loader
 - `src/chunker/chunker.ts` — hybrid AST/text chunker router
 - `src/sources/local-fs.ts` — local filesystem scanner

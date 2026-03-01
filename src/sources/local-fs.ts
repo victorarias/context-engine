@@ -109,6 +109,9 @@ function languageFromPath(path: string): string {
       return "go";
     case ".rs":
       return "rust";
+    case ".kt":
+    case ".kts":
+      return "kotlin";
     case ".java":
       return "java";
     case ".c":

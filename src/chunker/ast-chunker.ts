@@ -20,6 +20,7 @@ export interface AstChunkerOptions {
  * 2) Otherwise fallback to baseline parsers:
  *    - TS/JS via TypeScript compiler AST
  *    - Python via indentation-aware scanner
+ *    - Go/Rust/Kotlin via declaration scanners
  */
 export class AstChunker implements Chunker {
   private readonly preferTreeSitter: boolean;
@@ -30,7 +31,7 @@ export class AstChunker implements Chunker {
     this.treeSitter = options.treeSitterLoader ?? new TreeSitterLoader();
   }
 
-  async warmupTreeSitter(languages: TreeSitterLanguage[] = ["typescript", "javascript", "python"]): Promise<void> {
+  async warmupTreeSitter(languages: TreeSitterLanguage[] = ["typescript", "javascript", "python", "go", "rust"]): Promise<void> {
     await this.treeSitter.warmup(languages);
   }
 
@@ -56,6 +57,18 @@ export class AstChunker implements Chunker {
       return this.chunkPython(content, filePath, repoId);
     }
 
+    if (language === "go") {
+      return this.chunkGo(content, filePath, repoId);
+    }
+
+    if (language === "rust") {
+      return this.chunkRust(content, filePath, repoId);
+    }
+
+    if (language === "kotlin") {
+      return this.chunkKotlin(content, filePath, repoId);
+    }
+
     return [];
   }
 
@@ -78,12 +91,8 @@ export class AstChunker implements Chunker {
       const chunks: Chunk[] = [];
 
       for (const node of nodes) {
-        const symbolKind = symbolKindFromNodeType(node.type);
-        if (!symbolKind) continue;
-
-        const nameNode = node.childForFieldName("name");
-        const symbolName = nameNode?.text?.trim();
-        if (!symbolName) continue;
+        const info = extractTreeSitterSymbol(node, language);
+        if (!info) continue;
 
         const snippet = node.text?.trim();
         if (!snippet) continue;
@@ -91,21 +100,17 @@ export class AstChunker implements Chunker {
         const startLine = node.startPosition.row + 1;
         const endLine = node.endPosition.row + 1;
 
-        const parentSymbol = symbolKind === "method"
-          ? findNearestClassName(node.parent)
-          : undefined;
-
         chunks.push({
-          id: makeChunkId(filePath, startLine, endLine, snippet, symbolName, symbolKind),
+          id: makeChunkId(filePath, startLine, endLine, snippet, info.symbolName, info.symbolKind),
           content: snippet,
           filePath,
           startLine,
           endLine,
           language,
           repoId,
-          symbolName,
-          symbolKind,
-          parentSymbol,
+          symbolName: info.symbolName,
+          symbolKind: info.symbolKind,
+          parentSymbol: info.parentSymbol,
         });
       }
 
@@ -245,6 +250,170 @@ export class AstChunker implements Chunker {
 
     return dedupeChunks(chunks);
   }
+
+  private chunkGo(content: string, filePath: string, repoId: string): Chunk[] {
+    const lines = content.split(/\r?\n/);
+    const chunks: Chunk[] = [];
+
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      const methodMatch = line.match(/^\s*func\s*\(\s*[A-Za-z_][\w]*\s+\*?([A-Za-z_][\w]*)\s*\)\s+([A-Za-z_][\w]*)\s*\(/);
+      const fnMatch = line.match(/^\s*func\s+([A-Za-z_][\w]*)\s*\(/);
+      const structMatch = line.match(/^\s*type\s+([A-Za-z_][\w]*)\s+struct\b/);
+      const interfaceMatch = line.match(/^\s*type\s+([A-Za-z_][\w]*)\s+interface\b/);
+      const typeMatch = line.match(/^\s*type\s+([A-Za-z_][\w]*)\s+/);
+
+      let symbolName: string | undefined;
+      let symbolKind: SymbolKind | undefined;
+      let parentSymbol: string | undefined;
+
+      if (methodMatch) {
+        parentSymbol = methodMatch[1];
+        symbolName = methodMatch[2];
+        symbolKind = "method";
+      } else if (fnMatch) {
+        symbolName = fnMatch[1];
+        symbolKind = "function";
+      } else if (structMatch) {
+        symbolName = structMatch[1];
+        symbolKind = "class";
+      } else if (interfaceMatch) {
+        symbolName = interfaceMatch[1];
+        symbolKind = "interface";
+      } else if (typeMatch) {
+        symbolName = typeMatch[1];
+        symbolKind = "type";
+      }
+
+      if (!symbolName || !symbolKind) continue;
+
+      const startLine = i + 1;
+      const endLine = i + 1;
+      const snippet = line.trim();
+      if (!snippet) continue;
+
+      chunks.push({
+        id: makeChunkId(filePath, startLine, endLine, snippet, symbolName, symbolKind),
+        content: snippet,
+        filePath,
+        startLine,
+        endLine,
+        language: "go",
+        repoId,
+        symbolName,
+        symbolKind,
+        parentSymbol,
+      });
+    }
+
+    return dedupeChunks(chunks);
+  }
+
+  private chunkRust(content: string, filePath: string, repoId: string): Chunk[] {
+    const lines = content.split(/\r?\n/);
+    const chunks: Chunk[] = [];
+
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      const structMatch = line.match(/^\s*(?:pub\s+)?struct\s+([A-Za-z_][\w]*)\b/);
+      const enumMatch = line.match(/^\s*(?:pub\s+)?enum\s+([A-Za-z_][\w]*)\b/);
+      const traitMatch = line.match(/^\s*(?:pub\s+)?trait\s+([A-Za-z_][\w]*)\b/);
+      const fnMatch = line.match(/^\s*(?:pub\s+)?fn\s+([A-Za-z_][\w]*)\s*\(/);
+
+      let symbolName: string | undefined;
+      let symbolKind: SymbolKind | undefined;
+
+      if (structMatch) {
+        symbolName = structMatch[1];
+        symbolKind = "class";
+      } else if (enumMatch) {
+        symbolName = enumMatch[1];
+        symbolKind = "enum";
+      } else if (traitMatch) {
+        symbolName = traitMatch[1];
+        symbolKind = "interface";
+      } else if (fnMatch) {
+        symbolName = fnMatch[1];
+        symbolKind = "function";
+      }
+
+      if (!symbolName || !symbolKind) continue;
+
+      const startLine = i + 1;
+      const endLine = i + 1;
+      const snippet = line.trim();
+      if (!snippet) continue;
+
+      chunks.push({
+        id: makeChunkId(filePath, startLine, endLine, snippet, symbolName, symbolKind),
+        content: snippet,
+        filePath,
+        startLine,
+        endLine,
+        language: "rust",
+        repoId,
+        symbolName,
+        symbolKind,
+      });
+    }
+
+    return dedupeChunks(chunks);
+  }
+
+  private chunkKotlin(content: string, filePath: string, repoId: string): Chunk[] {
+    const lines = content.split(/\r?\n/);
+    const chunks: Chunk[] = [];
+
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      const classMatch = line.match(/^\s*(?:data\s+|sealed\s+|open\s+|abstract\s+)?class\s+([A-Za-z_][\w]*)\b/);
+      const interfaceMatch = line.match(/^\s*(?:sealed\s+)?interface\s+([A-Za-z_][\w]*)\b/);
+      const objectMatch = line.match(/^\s*object\s+([A-Za-z_][\w]*)\b/);
+      const typeAliasMatch = line.match(/^\s*typealias\s+([A-Za-z_][\w]*)\b/);
+      const fnMatch = line.match(/^\s*(?:suspend\s+)?fun\s+(?:[A-Za-z_][\w]*\.)?([A-Za-z_][\w]*)\s*\(/);
+
+      let symbolName: string | undefined;
+      let symbolKind: SymbolKind | undefined;
+
+      if (classMatch) {
+        symbolName = classMatch[1];
+        symbolKind = "class";
+      } else if (interfaceMatch) {
+        symbolName = interfaceMatch[1];
+        symbolKind = "interface";
+      } else if (objectMatch) {
+        symbolName = objectMatch[1];
+        symbolKind = "class";
+      } else if (typeAliasMatch) {
+        symbolName = typeAliasMatch[1];
+        symbolKind = "type";
+      } else if (fnMatch) {
+        symbolName = fnMatch[1];
+        symbolKind = "function";
+      }
+
+      if (!symbolName || !symbolKind) continue;
+
+      const startLine = i + 1;
+      const endLine = i + 1;
+      const snippet = line.trim();
+      if (!snippet) continue;
+
+      chunks.push({
+        id: makeChunkId(filePath, startLine, endLine, snippet, symbolName, symbolKind),
+        content: snippet,
+        filePath,
+        startLine,
+        endLine,
+        language: "kotlin",
+        repoId,
+        symbolName,
+        symbolKind,
+      });
+    }
+
+    return dedupeChunks(chunks);
+  }
 }
 
 function nodeTypesForLanguage(language: TreeSitterLanguage): string[] {
@@ -262,6 +431,145 @@ function nodeTypesForLanguage(language: TreeSitterLanguage): string[] {
       return ["function_declaration", "class_declaration", "method_definition"];
     case "python":
       return ["function_definition", "class_definition"];
+    case "go":
+      return ["function_declaration", "method_declaration", "type_spec"];
+    case "rust":
+      return ["struct_item", "enum_item", "trait_item", "function_item", "function_signature_item"];
+    case "kotlin":
+      return ["class_declaration", "interface_declaration", "function_declaration", "type_alias", "object_declaration"];
+  }
+}
+
+function extractTreeSitterSymbol(
+  node: any,
+  language: TreeSitterLanguage,
+): { symbolName: string; symbolKind: SymbolKind; parentSymbol?: string } | null {
+  switch (language) {
+    case "typescript":
+    case "javascript":
+    case "python": {
+      const symbolKind = symbolKindFromNodeType(node.type);
+      if (!symbolKind) return null;
+
+      const nameNode = node.childForFieldName("name");
+      const symbolName = nameNode?.text?.trim();
+      if (!symbolName) return null;
+
+      return {
+        symbolName,
+        symbolKind,
+        parentSymbol: symbolKind === "method" ? findNearestClassName(node.parent) : undefined,
+      };
+    }
+
+    case "go": {
+      if (node.type === "function_declaration") {
+        const name = node.childForFieldName("name")?.text?.trim();
+        if (!name) return null;
+        return { symbolName: name, symbolKind: "function" };
+      }
+
+      if (node.type === "method_declaration") {
+        const name = node.childForFieldName("name")?.text?.trim();
+        if (!name) return null;
+        return {
+          symbolName: name,
+          symbolKind: "method",
+          parentSymbol: findGoReceiverType(node),
+        };
+      }
+
+      if (node.type === "type_spec") {
+        const name = node.childForFieldName("name")?.text?.trim();
+        if (!name) return null;
+        const kind = symbolKindForGoTypeSpec(node);
+        return { symbolName: name, symbolKind: kind };
+      }
+
+      return null;
+    }
+
+    case "rust": {
+      if (node.type === "struct_item") {
+        const name = node.childForFieldName("name")?.text?.trim();
+        if (!name) return null;
+        return { symbolName: name, symbolKind: "class" };
+      }
+
+      if (node.type === "enum_item") {
+        const name = node.childForFieldName("name")?.text?.trim();
+        if (!name) return null;
+        return { symbolName: name, symbolKind: "enum" };
+      }
+
+      if (node.type === "trait_item") {
+        const name = node.childForFieldName("name")?.text?.trim();
+        if (!name) return null;
+        return { symbolName: name, symbolKind: "interface" };
+      }
+
+      if (node.type === "function_item" || node.type === "function_signature_item") {
+        const name = node.childForFieldName("name")?.text?.trim();
+        if (!name) return null;
+
+        const implParent = findNearestAncestor(node.parent, "impl_item");
+        if (implParent) {
+          const implType = implParent.childForFieldName("type")?.text?.trim();
+          return {
+            symbolName: name,
+            symbolKind: "method",
+            parentSymbol: implType || undefined,
+          };
+        }
+
+        const traitParent = findNearestAncestor(node.parent, "trait_item");
+        if (traitParent) {
+          const traitName = traitParent.childForFieldName("name")?.text?.trim();
+          return {
+            symbolName: name,
+            symbolKind: "method",
+            parentSymbol: traitName || undefined,
+          };
+        }
+
+        return { symbolName: name, symbolKind: "function" };
+      }
+
+      return null;
+    }
+
+    case "kotlin": {
+      const name = node.childForFieldName("name")?.text?.trim();
+      if (!name) return null;
+
+      if (node.type === "class_declaration" || node.type === "object_declaration") {
+        return { symbolName: name, symbolKind: "class" };
+      }
+
+      if (node.type === "interface_declaration") {
+        return { symbolName: name, symbolKind: "interface" };
+      }
+
+      if (node.type === "type_alias") {
+        return { symbolName: name, symbolKind: "type" };
+      }
+
+      if (node.type === "function_declaration") {
+        const classParent = findNearestAncestor(node.parent, "class_declaration")
+          ?? findNearestAncestor(node.parent, "object_declaration")
+          ?? findNearestAncestor(node.parent, "interface_declaration");
+
+        const parentSymbol = classParent?.childForFieldName("name")?.text?.trim();
+
+        return {
+          symbolName: name,
+          symbolKind: parentSymbol ? "method" : "function",
+          parentSymbol: parentSymbol || undefined,
+        };
+      }
+
+      return null;
+    }
   }
 }
 
@@ -286,6 +594,27 @@ function symbolKindFromNodeType(type: string): SymbolKind | null {
   }
 }
 
+function symbolKindForGoTypeSpec(node: any): SymbolKind {
+  const typeNode = node.childForFieldName("type");
+  if (!typeNode) return "type";
+
+  if (typeNode.type === "struct_type") return "class";
+  if (typeNode.type === "interface_type") return "interface";
+  return "type";
+}
+
+function findGoReceiverType(node: any): string | undefined {
+  const receiver = node.childForFieldName?.("receiver");
+  if (!receiver) return undefined;
+
+  const identifiers = receiver.descendantsOfType?.(["type_identifier"]);
+  if (Array.isArray(identifiers) && identifiers.length > 0) {
+    return identifiers[identifiers.length - 1]?.text?.trim() || undefined;
+  }
+
+  return undefined;
+}
+
 function findNearestClassName(node: any): string | undefined {
   let cursor = node;
   while (cursor) {
@@ -298,8 +627,17 @@ function findNearestClassName(node: any): string | undefined {
   return undefined;
 }
 
+function findNearestAncestor(node: any, type: string): any | null {
+  let cursor = node;
+  while (cursor) {
+    if (cursor.type === type) return cursor;
+    cursor = cursor.parent;
+  }
+  return null;
+}
+
 function isTreeSitterLanguage(lang: string): lang is TreeSitterLanguage {
-  return lang === "typescript" || lang === "javascript" || lang === "python";
+  return lang === "typescript" || lang === "javascript" || lang === "python" || lang === "go" || lang === "rust" || lang === "kotlin";
 }
 
 function makeChunkId(

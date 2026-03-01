@@ -1,7 +1,7 @@
 import { Language, Parser } from "web-tree-sitter";
 import { fileURLToPath } from "node:url";
 
-export type TreeSitterLanguage = "typescript" | "javascript" | "python";
+export type TreeSitterLanguage = "typescript" | "javascript" | "python" | "go" | "rust" | "kotlin";
 
 const LANGUAGE_TO_WASM_CANDIDATES: Record<TreeSitterLanguage, string[]> = {
   typescript: [
@@ -16,6 +16,17 @@ const LANGUAGE_TO_WASM_CANDIDATES: Record<TreeSitterLanguage, string[]> = {
     "@vscode/tree-sitter-wasm/wasm/tree-sitter-python.wasm",
     "tree-sitter-wasms/out/tree-sitter-python.wasm",
   ],
+  go: [
+    "@vscode/tree-sitter-wasm/wasm/tree-sitter-go.wasm",
+    "tree-sitter-wasms/out/tree-sitter-go.wasm",
+  ],
+  rust: [
+    "@vscode/tree-sitter-wasm/wasm/tree-sitter-rust.wasm",
+    "tree-sitter-wasms/out/tree-sitter-rust.wasm",
+  ],
+  kotlin: [
+    "tree-sitter-wasms/out/tree-sitter-kotlin.wasm",
+  ],
 };
 
 /**
@@ -29,7 +40,7 @@ export class TreeSitterLoader {
   private parsers = new Map<TreeSitterLanguage, Parser>();
   private warnings: string[] = [];
 
-  async warmup(langs: TreeSitterLanguage[] = ["typescript", "javascript", "python"]): Promise<void> {
+  async warmup(langs: TreeSitterLanguage[] = ["typescript", "javascript", "python", "go", "rust"]): Promise<void> {
     await this.ensureParserRuntime();
 
     for (const lang of langs) {
