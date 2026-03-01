@@ -26,6 +26,11 @@ describe("MCP Server HTTP E2E", () => {
         {
           sources: [{ path: join(projectRoot, "src") }],
           dataDir: join(tempDir, "data"),
+          embedding: {
+            provider: "local",
+            localBackend: "mock",
+            dimensions: 64,
+          },
           server: {
             transport: "http",
             host: "127.0.0.1",

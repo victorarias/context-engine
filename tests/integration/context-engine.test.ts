@@ -45,6 +45,11 @@ describe("ContextEngine", () => {
     const config = ConfigSchema.parse({
       sources: [{ path: sourceDir }],
       dataDir: join(tmp.path, "data"),
+      embedding: {
+        provider: "local",
+        localBackend: "mock",
+        dimensions: 768,
+      },
     });
 
     const engine = await ContextEngine.create(config);
@@ -83,6 +88,11 @@ describe("ContextEngine", () => {
     const config = ConfigSchema.parse({
       sources: [{ path: sourceDir }],
       dataDir: join(tmp.path, "data"),
+      embedding: {
+        provider: "local",
+        localBackend: "mock",
+        dimensions: 768,
+      },
     });
 
     const engine = await ContextEngine.create(config);
@@ -176,6 +186,11 @@ describe("ContextEngine", () => {
     const config = ConfigSchema.parse({
       sources: [{ path: sourceDir }],
       dataDir,
+      embedding: {
+        provider: "local",
+        localBackend: "mock",
+        dimensions: 768,
+      },
     });
 
     const engine = await ContextEngine.create(config);

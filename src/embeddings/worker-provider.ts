@@ -62,7 +62,7 @@ export class WorkerEmbeddingProvider implements EmbeddingRuntimeProvider {
     this.maxPendingIndexJobs = Math.max(1, options.maxPendingIndexJobs ?? 2);
 
     const backend = options.backend ?? "mock";
-    const model = options.model ?? "nomic-embed-text-v1.5";
+    const model = options.model ?? "Xenova/all-MiniLM-L6-v2";
     this.modelId = backend === "onnx" ? `local-onnx/${model}` : "local-mock/worker";
 
     const workerUrl = new URL("./worker-thread.ts", import.meta.url);

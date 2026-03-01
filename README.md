@@ -55,8 +55,8 @@ Create `context-engine.json`:
   "dataDir": "./.context-engine",
   "embedding": {
     "provider": "local",
-    "localBackend": "mock",
-    "model": "nomic-embed-text-v1.5",
+    "localBackend": "onnx",
+    "model": "Xenova/all-MiniLM-L6-v2",
     "dimensions": 768,
     "fallbackToMock": true
   },
@@ -82,12 +82,12 @@ Supported embedding providers are **only**:
 
 Default rollout policy:
 - `embedding.provider = "local"`
-- `embedding.localBackend = "mock"` (safe default)
-- ONNX is opt-in via `localBackend: "onnx"`
+- `embedding.localBackend = "onnx"` (real local embeddings by default)
+- `fallbackToMock = true` keeps startup resilient when ONNX init fails
 
 Local backend modes:
-- `mock` (fast, deterministic, default)
-- `onnx` (real local embeddings via `@huggingface/transformers`)
+- `onnx` (real local embeddings via `@huggingface/transformers`, default)
+- `mock` (fast, deterministic fallback/dev mode)
 
 Local ONNX example:
 

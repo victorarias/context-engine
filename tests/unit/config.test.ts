@@ -20,10 +20,10 @@ describe("Config", () => {
     it("produces valid config from empty object", () => {
       const config = ConfigSchema.parse({});
       expect(config.embedding.provider).toBe("local");
-      expect(config.embedding.model).toBe("nomic-embed-text-v1.5");
+      expect(config.embedding.model).toBe("Xenova/all-MiniLM-L6-v2");
       expect(config.embedding.dimensions).toBe(768);
       expect(config.embedding.batchSize).toBe(32);
-      expect(config.embedding.localBackend).toBe("mock");
+      expect(config.embedding.localBackend).toBe("onnx");
       expect(config.embedding.requestTimeoutMs).toBe(30000);
       expect(config.embedding.maxRetries).toBe(2);
       expect(config.embedding.retryBaseDelayMs).toBe(250);

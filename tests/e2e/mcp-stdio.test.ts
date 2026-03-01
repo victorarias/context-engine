@@ -27,6 +27,11 @@ describe("MCP Server E2E", () => {
           sources: [{ path: join(projectRoot, "src") }],
           docs: [{ url: docsUrl }],
           dataDir: join(tempDir, "data"),
+          embedding: {
+            provider: "local",
+            localBackend: "mock",
+            dimensions: 64,
+          },
           server: { transport: "stdio" },
           watcher: { enabled: false },
         },

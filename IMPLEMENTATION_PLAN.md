@@ -21,7 +21,7 @@ This plan operationalizes `ARCHITECTURE.md` into execution-ready work.
   - Sliding-window text chunker implemented
   - Local recursive scanner implemented
   - Incremental hash-based reindex implemented
-  - Real indexing pipeline wired (scan → chunk → embed(mock) → storage)
+  - Real indexing pipeline wired (scan → chunk → embed(worker local backend) → storage)
   - Delete handling implemented
 - **M4 (Embedding Worker): ✅ Complete**
   - Worker-thread embedding runtime + IPC implemented
@@ -30,7 +30,7 @@ This plan operationalizes `ARCHITECTURE.md` into execution-ready work.
   - Vertex provider implemented with retry/token-refresh logic (`src/embeddings/vertex.ts`)
   - Local ONNX embedder implemented in worker (`src/embeddings/local-onnx.ts`)
   - Provider-switch tests added (local mock/onnx fallback + vertex unit tests)
-  - Default rollout policy documented: `localBackend = mock` (safe default), ONNX opt-in
+  - Default rollout policy documented: `localBackend = onnx` with `fallbackToMock = true`
 - **M5 (AST Chunker): ✅ Complete**
   - `src/chunker/ast-chunker.ts` added (TS/JS + Python symbol extraction)
   - tree-sitter WASM loader/registry integrated (`src/chunker/tree-sitter-loader.ts`)
@@ -123,7 +123,7 @@ Validation status (latest):
 - [x] Implement sliding-window chunker with overlap + line tracking
 - [x] Implement recursive local scanner + include/exclude globs
 - [x] Add incremental content hashing (skip unchanged files)
-- [x] Wire indexer pipeline: scan → chunk → embed(mock) → write storage
+- [x] Wire indexer pipeline: scan → chunk → embed(worker local backend) → write storage
 - [x] Add delete handling (remove vectors/chunks for deleted files)
 
 ### Exit Criteria

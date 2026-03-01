@@ -339,8 +339,8 @@ async function search(query: string, worktreeId: string): Promise<Result[]> {
   ],
   "embedding": {
     "provider": "local",
-    "localBackend": "mock",
-    "model": "nomic-embed-text-v1.5",
+    "localBackend": "onnx",
+    "model": "Xenova/all-MiniLM-L6-v2",
     "dimensions": 768,
     "fallbackToMock": true
   },
@@ -744,7 +744,7 @@ M8: Hardening            Security layer + code sandbox + crash recovery + polish
 - M3 delivered with real local indexing pipeline:
   - `src/chunker/text-chunker.ts`
   - `src/sources/local-fs.ts`
-  - `src/engine/context-engine.ts` (scan → chunk → embed(mock) → LanceDB/SQLite)
+  - `src/engine/context-engine.ts` (scan → chunk → embed(onnx-by-default, mock fallback) → LanceDB/SQLite)
 - M4 completed:
   - `src/embeddings/worker-provider.ts` + `src/embeddings/worker-thread.ts`
   - `src/embeddings/local-onnx.ts` (worker ONNX runtime)
@@ -752,7 +752,7 @@ M8: Hardening            Security layer + code sandbox + crash recovery + polish
   - priority queue + indexing backpressure implemented
   - Vertex retry/token-refresh handling implemented + tested
   - provider-switch tests added (local mock/onnx fallback + vertex)
-  - default rollout policy documented: `localBackend = mock` (ONNX opt-in)
+  - default rollout policy documented: `localBackend = onnx` with `fallbackToMock = true`
 - M5 completed:
   - `src/chunker/ast-chunker.ts` (TS/JS + Python symbol chunk extraction)
   - `src/chunker/tree-sitter-loader.ts` (tree-sitter WASM loader/registry)

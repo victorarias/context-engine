@@ -23,12 +23,12 @@ const SourceSchema = z.object({
 const EmbeddingSchema = z
   .object({
     provider: z.enum(["local", "vertex"]).default("local"),
-    model: z.string().default("nomic-embed-text-v1.5"),
+    model: z.string().default("Xenova/all-MiniLM-L6-v2"),
     dimensions: z.number().default(768),
     batchSize: z.number().default(32),
 
     // Local provider specific
-    localBackend: z.enum(["mock", "onnx"]).default("mock"),
+    localBackend: z.enum(["mock", "onnx"]).default("onnx"),
     cacheDir: z.string().optional(),
     fallbackToMock: z.boolean().default(true),
 
@@ -80,10 +80,10 @@ export const ConfigSchema = z.object({
   sources: z.array(SourceSchema).default([]),
   embedding: EmbeddingSchema.default({
     provider: "local",
-    model: "nomic-embed-text-v1.5",
+    model: "Xenova/all-MiniLM-L6-v2",
     dimensions: 768,
     batchSize: 32,
-    localBackend: "mock",
+    localBackend: "onnx",
     fallbackToMock: true,
     requestTimeoutMs: 30000,
     maxRetries: 2,

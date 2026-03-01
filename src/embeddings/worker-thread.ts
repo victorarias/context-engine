@@ -30,7 +30,7 @@ type WorkerEmbeddingProvider = {
 
 const dimensions = (workerData?.dimensions as number | undefined) ?? 128;
 const backend = ((workerData?.backend as Backend | undefined) ?? "mock") as Backend;
-const model = (workerData?.model as string | undefined) ?? "nomic-embed-text-v1.5";
+const model = (workerData?.model as string | undefined) ?? "Xenova/all-MiniLM-L6-v2";
 const cacheDir = workerData?.cacheDir as string | undefined;
 const fallbackToMock = (workerData?.fallbackToMock as boolean | undefined) ?? true;
 const forceOnnxInitFailure = (workerData?.forceOnnxInitFailure as boolean | undefined) ?? false;

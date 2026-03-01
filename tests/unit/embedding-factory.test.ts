@@ -10,7 +10,7 @@ describe("createEmbeddingProvider", () => {
     });
 
     const provider = createEmbeddingProvider(config);
-    expect(provider.modelId).toContain("worker");
+    expect(provider.modelId.startsWith("local-onnx/") || provider.modelId === "local-mock/worker").toBe(true);
     expect(provider.dimensions).toBe(64);
     await provider.close();
   });
