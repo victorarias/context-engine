@@ -31,6 +31,9 @@ bun run mcp:status
 # Validate storage consistency
 bun run mcp:doctor
 
+# Fast MCP preflight (connect + listTools + status + semantic_search)
+bun run mcp:probe
+
 # Full rebuild if needed
 bun run src/cli.ts reindex
 ```
@@ -135,6 +138,32 @@ bun run test:unit
 bun run test:integration
 bun run test:e2e
 bun run test:quality
+```
+
+All test scripts run with engine debug logging enabled and write JSONL logs to:
+
+- `.context-engine/test-logs/unit.log`
+- `.context-engine/test-logs/integration.log`
+- `.context-engine/test-logs/e2e.log`
+- `.context-engine/test-logs/eval.log`
+- `.context-engine/test-logs/bench.log`
+- `.context-engine/test-logs/contract.log`
+- `.context-engine/test-logs/regression.log`
+
+Runtime logging controls:
+
+- `CE_LOG_LEVEL=debug|info|warn|error`
+- `CE_LOG_FILE=/path/to/log.jsonl`
+- `CE_LOG_STDERR=0` to disable stderr log output
+
+MCP stuck-debug workflow (recommended before external-agent runs):
+
+```bash
+# quick, bounded probe with timing per step + engine log tail on failure
+bun run mcp:probe
+
+# probe with your real config
+bun run mcp:probe -- --config ./context-engine.json --step-timeout-ms 8000
 ```
 
 ## Key Files

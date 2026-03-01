@@ -2,6 +2,59 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { Engine } from "../engine/engine.js";
 import { runCodeSandbox } from "./tools/code-sandbox.js";
+import { logError, logEvent } from "../observability/logger.js";
+
+function summarizeArgs(args: unknown): Record<string, unknown> {
+  if (!args || typeof args !== "object") return {};
+
+  const input = args as Record<string, unknown>;
+  const summary: Record<string, unknown> = {};
+
+  for (const [key, value] of Object.entries(input)) {
+    if (typeof value === "string") {
+      summary[key] = value.length > 120 ? `${value.slice(0, 120)}…` : value;
+      continue;
+    }
+
+    if (Array.isArray(value)) {
+      summary[key] = `array(${value.length})`;
+      continue;
+    }
+
+    if (value && typeof value === "object") {
+      summary[key] = "object";
+      continue;
+    }
+
+    summary[key] = value;
+  }
+
+  return summary;
+}
+
+async function withToolLogging<T>(toolName: string, args: unknown, fn: () => Promise<T>): Promise<T> {
+  const startedAt = Date.now();
+  logEvent("debug", "mcp.tool.start", {
+    toolName,
+    args: summarizeArgs(args),
+  });
+
+  try {
+    const result = await fn();
+    logEvent("debug", "mcp.tool.complete", {
+      toolName,
+      durationMs: Date.now() - startedAt,
+    });
+    return result;
+  } catch (error) {
+    logError("mcp.tool.failed", error, {
+      toolName,
+      args: summarizeArgs(args),
+      durationMs: Date.now() - startedAt,
+    });
+    throw error;
+  }
+}
 
 /**
  * Create and configure the MCP server with all tools wired to the engine.
@@ -19,6 +72,11 @@ export function createMcpServer(engine: Engine): McpServer {
     },
   );
 
+  logEvent("info", "mcp.server.created", {
+    name: "context-engine",
+    version: "0.1.0",
+  });
+
   // ─── semantic_search ──────────────────────────────────────────────
 
   server.registerTool("semantic_search", {
@@ -31,7 +89,7 @@ export function createMcpServer(engine: Engine): McpServer {
       limit: z.number().optional().default(10).describe("Max results to return"),
       worktreeId: z.string().optional().describe("Scope search to a specific worktree"),
     },
-  }, async (args) => {
+  }, async (args) => withToolLogging("semantic_search", args, async () => {
     const results = await engine.search(args.query, {
       limit: args.limit,
       worktreeId: args.worktreeId,
@@ -51,7 +109,7 @@ export function createMcpServer(engine: Engine): McpServer {
       .join("\n\n");
 
     return { content: [{ type: "text", text }] };
-  });
+  }));
 
   // ─── find_files ───────────────────────────────────────────────────
 
@@ -63,7 +121,7 @@ export function createMcpServer(engine: Engine): McpServer {
       pattern: z.string().describe("Glob pattern or file name substring (e.g. '*.ts', 'auth')"),
       worktreeId: z.string().optional().describe("Scope to a specific worktree"),
     },
-  }, async (args) => {
+  }, async (args) => withToolLogging("find_files", args, async () => {
     const files = await engine.findFiles(args.pattern, {
       worktreeId: args.worktreeId,
     });
@@ -73,7 +131,7 @@ export function createMcpServer(engine: Engine): McpServer {
     }
 
     return { content: [{ type: "text", text: files.join("\n") }] };
-  });
+  }));
 
   // ─── get_symbols ──────────────────────────────────────────────────
 
@@ -86,7 +144,7 @@ export function createMcpServer(engine: Engine): McpServer {
       filePath: z.string().optional().describe("File path to list symbols from"),
       kind: z.string().optional().describe("Symbol kind: function, class, interface, type, etc."),
     },
-  }, async (args) => {
+  }, async (args) => withToolLogging("get_symbols", args, async () => {
     const symbols = await engine.getSymbols(args);
 
     if (symbols.length === 0) {
@@ -98,7 +156,7 @@ export function createMcpServer(engine: Engine): McpServer {
       .join("\n");
 
     return { content: [{ type: "text", text }] };
-  });
+  }));
 
   // ─── get_file_summary ─────────────────────────────────────────────
 
@@ -109,10 +167,10 @@ export function createMcpServer(engine: Engine): McpServer {
     inputSchema: {
       path: z.string().describe("File path to summarize"),
     },
-  }, async (args) => {
+  }, async (args) => withToolLogging("get_file_summary", args, async () => {
     const summary = await engine.getFileSummary(args.path);
     return { content: [{ type: "text", text: summary }] };
-  });
+  }));
 
   // ─── get_recent_changes ───────────────────────────────────────────
 
@@ -123,10 +181,10 @@ export function createMcpServer(engine: Engine): McpServer {
     inputSchema: {
       query: z.string().optional().describe("Filter changes related to this topic"),
     },
-  }, async (args) => {
+  }, async (args) => withToolLogging("get_recent_changes", args, async () => {
     const changes = await engine.getRecentChanges(args.query);
     return { content: [{ type: "text", text: changes }] };
-  });
+  }));
 
   // ─── get_dependencies ─────────────────────────────────────────────
 
@@ -136,10 +194,10 @@ export function createMcpServer(engine: Engine): McpServer {
     inputSchema: {
       path: z.string().describe("File path to analyze dependencies for"),
     },
-  }, async (args) => {
+  }, async (args) => withToolLogging("get_dependencies", args, async () => {
     const deps = await engine.getDependencies(args.path);
     return { content: [{ type: "text", text: deps }] };
-  });
+  }));
 
   // ─── search_docs ──────────────────────────────────────────────────
 
@@ -150,7 +208,7 @@ export function createMcpServer(engine: Engine): McpServer {
     inputSchema: {
       query: z.string().describe("Search query for documentation"),
     },
-  }, async (args) => {
+  }, async (args) => withToolLogging("search_docs", args, async () => {
     const results = await engine.searchDocs(args.query);
 
     if (results.length === 0) {
@@ -162,7 +220,7 @@ export function createMcpServer(engine: Engine): McpServer {
       .join("\n\n");
 
     return { content: [{ type: "text", text }] };
-  });
+  }));
 
   // ─── code_sandbox ────────────────────────────────────────────────
 
@@ -175,7 +233,7 @@ export function createMcpServer(engine: Engine): McpServer {
       input: z.unknown().optional().describe("Read-only input object available as `input` in sandbox."),
       timeoutMs: z.number().optional().default(5000).describe("Execution timeout in milliseconds."),
     },
-  }, async (args) => {
+  }, async (args) => withToolLogging("code_sandbox", args, async () => {
     try {
       const result = await runCodeSandbox(args.code, {
         input: args.input,
@@ -196,13 +254,13 @@ export function createMcpServer(engine: Engine): McpServer {
         }],
       };
     }
-  });
+  }));
 
   // ─── status ───────────────────────────────────────────────────────
 
   server.registerTool("status", {
     description: "Get the current status of the context engine: indexing progress, repos, worker state.",
-  }, async () => {
+  }, async () => withToolLogging("status", {}, async () => {
     const s = await engine.status();
     const lines = [
       `Indexing: ${s.indexing ? "in progress" : "idle"}`,
@@ -214,7 +272,7 @@ export function createMcpServer(engine: Engine): McpServer {
       lines.push(`  ${r.path} — ${r.filesIndexed} files, ${r.chunksStored} chunks`);
     }
     return { content: [{ type: "text", text: lines.join("\n") }] };
-  });
+  }));
 
   return server;
 }

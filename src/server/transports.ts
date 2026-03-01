@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { logError, logEvent } from "../observability/logger.js";
 
 /**
  * Attach an MCP server to STDIO transport.
@@ -10,6 +11,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 export async function attachStdio(server: McpServer): Promise<StdioServerTransport> {
   const transport = new StdioServerTransport();
   await server.connect(transport);
+  logEvent("info", "transport.stdio.connected");
   return transport;
 }
 
@@ -27,6 +29,9 @@ export async function attachHttp(
 
   const httpServer = createServer((req, res) => {
     const url = req.url ?? "";
+    const method = req.method ?? "UNKNOWN";
+
+    logEvent("debug", "transport.http.request", { method, url });
 
     if (!url.startsWith(path)) {
       res.statusCode = 404;
@@ -36,6 +41,7 @@ export async function attachHttp(
     }
 
     transport.handleRequest(req, res).catch((error) => {
+      logError("transport.http.request_failed", error, { method, url });
       res.statusCode = 500;
       res.setHeader("content-type", "application/json");
       res.end(JSON.stringify({ error: error instanceof Error ? error.message : String(error) }));
@@ -48,6 +54,12 @@ export async function attachHttp(
       httpServer.off("error", rejectListen);
       resolveListen();
     });
+  });
+
+  logEvent("info", "transport.http.connected", {
+    host: options.host,
+    port: options.port,
+    path,
   });
 
   return { transport, httpServer };

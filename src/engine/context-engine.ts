@@ -18,6 +18,7 @@ import {
   WriteAheadLog,
   normalizePathForLookup,
 } from "../storage/index.js";
+import { logError, logEvent } from "../observability/logger.js";
 
 const DEFAULT_WORKTREE_ID = "default-worktree";
 
@@ -55,14 +56,29 @@ export class ContextEngine implements Engine {
 
   static async create(config: Config): Promise<ContextEngine> {
     const engine = new ContextEngine(config);
+    const startedAt = Date.now();
+
+    logEvent("info", "engine.create.start", {
+      sourceCount: config.sources.length,
+      dataDir: config.dataDir,
+      transport: config.server.transport,
+    });
+
     await engine.reconcileWriteLog();
 
     // Best-effort AST parser warmup (tree-sitter). Failures are captured as warnings.
     try {
       await engine.chunker.warmup();
-    } catch {
+    } catch (error) {
+      logError("engine.create.chunker_warmup_failed", error);
       // no-op; chunker has fallback path
     }
+
+    logEvent("info", "engine.create.complete", {
+      durationMs: Date.now() - startedAt,
+      modelId: engine.embedder.modelId,
+      dimensions: engine.embedder.dimensions,
+    });
 
     return engine;
   }
@@ -70,7 +86,13 @@ export class ContextEngine implements Engine {
   async search(query: string, options?: { worktreeId?: string; limit?: number }): Promise<SearchResult[]> {
     if (!query.trim()) return [];
 
+    const startedAt = Date.now();
     const worktreeId = options?.worktreeId ?? this.primaryWorktreeId;
+    logEvent("debug", "engine.search.start", {
+      query,
+      worktreeId,
+      limit: options?.limit ?? 10,
+    });
     const [queryVector] = await this.embedder.embedWithPriority([query], 0);
     const limit = Math.max(1, options?.limit ?? 10);
 
@@ -136,7 +158,7 @@ export class ContextEngine implements Engine {
 
     const byChunkId = new Map(candidates.map((candidate) => [candidate.result.chunkId, candidate.result]));
 
-    return reranked
+    const results = reranked
       .map((candidate) => {
         const result = byChunkId.get(candidate.chunk.id);
         if (!result) return null;
@@ -155,6 +177,16 @@ export class ContextEngine implements Engine {
         };
       })
       .filter((entry): entry is SearchResult => entry !== null);
+
+    logEvent("debug", "engine.search.complete", {
+      query,
+      worktreeId,
+      vectorCandidates: vectorResults.length,
+      returned: results.length,
+      durationMs: Date.now() - startedAt,
+    });
+
+    return results;
   }
 
   async findFiles(pattern: string, options?: { worktreeId?: string }): Promise<string[]> {
@@ -360,6 +392,15 @@ export class ContextEngine implements Engine {
     const roots = (dirs?.length ? dirs : this.config.sources.map((s) => s.path)).map((d) => resolve(d));
     this.indexedRoots = roots;
 
+    const startedAt = Date.now();
+    let scannedFiles = 0;
+    let changedFiles = 0;
+
+    logEvent("info", "engine.index.start", {
+      roots,
+      docs: this.config.docs.length,
+    });
+
     this.indexing = true;
     try {
       let isFirstRoot = true;
@@ -393,6 +434,7 @@ export class ContextEngine implements Engine {
         for await (const file of this.scanner.scan(root, {
           exclude: this.config.sources.find((s) => resolve(s.path) === root)?.exclude,
         })) {
+          scannedFiles += 1;
           const filePath = normalizeFilePath(relative(root, file.path));
           seenPaths.add(filePath);
 
@@ -411,6 +453,7 @@ export class ContextEngine implements Engine {
             continue;
           }
 
+          changedFiles += 1;
           const contentChanged = previousHash !== file.contentHash;
           const content = readFileSync(file.path, "utf-8");
 
@@ -496,6 +539,21 @@ export class ContextEngine implements Engine {
 
       await this.indexDocs();
       await this.metadataStore.setIndexState("engine:lastIndexedAt", String(Date.now()));
+
+      logEvent("info", "engine.index.complete", {
+        roots,
+        scannedFiles,
+        changedFiles,
+        durationMs: Date.now() - startedAt,
+      });
+    } catch (error) {
+      logError("engine.index.failed", error, {
+        roots,
+        scannedFiles,
+        changedFiles,
+        durationMs: Date.now() - startedAt,
+      });
+      throw error;
     } finally {
       this.indexing = false;
     }
@@ -510,12 +568,26 @@ export class ContextEngine implements Engine {
 
     this.indexedRoots = roots;
 
+    const pollIntervalMs = options?.pollIntervalMs ?? this.config.watcher.pollIntervalMs;
+    const debounceMs = options?.debounceMs ?? this.config.watcher.debounceMs;
+
+    logEvent("info", "engine.watcher.start", {
+      roots,
+      pollIntervalMs,
+      debounceMs,
+    });
+
     this.watcher = new WorktreeWatcher({
       roots,
-      pollIntervalMs: options?.pollIntervalMs ?? this.config.watcher.pollIntervalMs,
-      debounceMs: options?.debounceMs ?? this.config.watcher.debounceMs,
+      pollIntervalMs,
+      debounceMs,
       ignorePaths: [resolve(this.config.dataDir)],
       onChange: async () => {
+        logEvent("debug", "engine.watcher.change_detected", {
+          indexing: this.indexing,
+          queued: this.watcherReindexQueued,
+        });
+
         if (this.indexing) {
           this.watcherReindexQueued = true;
           return;
@@ -540,13 +612,16 @@ export class ContextEngine implements Engine {
 
     await this.watcher.stop();
     this.watcher = null;
+    logEvent("info", "engine.watcher.stopped");
   }
 
   async close(): Promise<void> {
+    logEvent("info", "engine.close.start");
     await this.stopWatching();
     await this.vectorStore.close();
     await this.metadataStore.close();
     await this.embedder.close();
+    logEvent("info", "engine.close.complete");
   }
 
   private async indexDocs(): Promise<void> {
@@ -556,6 +631,10 @@ export class ContextEngine implements Engine {
       return;
     }
 
+    logEvent("info", "engine.docs.index.start", {
+      docCount: docs.length,
+    });
+
     for (const doc of docs) {
       try {
         const fetched = await fetchDocument(doc.url, doc.selector);
@@ -563,11 +642,17 @@ export class ContextEngine implements Engine {
 
         if (chunks.length === 0) {
           await this.metadataStore.deleteDocChunks(doc.url);
+          logEvent("debug", "engine.docs.index.empty", { url: doc.url });
           continue;
         }
 
         await this.metadataStore.upsertDocChunks(doc.url, fetched.title, chunks);
-      } catch {
+        logEvent("debug", "engine.docs.index.upsert", {
+          url: doc.url,
+          chunks: chunks.length,
+        });
+      } catch (error) {
+        logError("engine.docs.index.failed", error, { url: doc.url });
         // Keep indexing resilient; docs can be transiently unavailable.
       }
     }

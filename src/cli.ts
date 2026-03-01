@@ -7,6 +7,7 @@ import { resolve } from "node:path";
 import { ContextEngine } from "./engine/context-engine.js";
 import { loadConfig } from "./config.js";
 import { LanceVectorStore, SQLiteMetadataStore, checkStorageConsistency } from "./storage/index.js";
+import { logError, logEvent } from "./observability/logger.js";
 
 const args = process.argv.slice(2);
 const command = args[0];
@@ -49,6 +50,13 @@ async function main() {
 
 async function serve() {
   const config = loadConfig(args[1]);
+  logEvent("info", "cli.serve.start", {
+    transport: config.server.transport,
+    host: config.server.host,
+    port: config.server.port,
+    sources: config.sources.map((source) => source.path),
+  });
+
   const engine = await ContextEngine.create(config);
 
   await engine.index(config.sources.map((s) => s.path));
@@ -62,8 +70,11 @@ async function serve() {
 
   if (transportType === "stdio") {
     await attachStdio(server);
+    logEvent("info", "cli.serve.transport_ready", { transport: "stdio" });
+
     // Keep alive until stdin closes
     process.stdin.on("end", async () => {
+      logEvent("info", "cli.serve.stdin_end");
       await engine.close();
       process.exit(0);
     });
@@ -76,8 +87,15 @@ async function serve() {
   });
 
   console.error(`HTTP MCP server listening on http://${config.server.host}:${config.server.port}/mcp`);
+  logEvent("info", "cli.serve.transport_ready", {
+    transport: "http",
+    host: config.server.host,
+    port: config.server.port,
+    path: "/mcp",
+  });
 
   const shutdown = async () => {
+    logEvent("info", "cli.serve.shutdown");
     await engine.close();
     await new Promise<void>((resolveClose) => httpServer.close(() => resolveClose()));
     process.exit(0);
@@ -92,10 +110,12 @@ async function index() {
   const config = loadConfig(dir);
   const engine = await ContextEngine.create(config);
 
+  logEvent("info", "cli.index.start", { sources: config.sources.map((s) => s.path) });
   console.log(`Indexing ${config.sources.map((s) => s.path).join(", ")}...`);
   await engine.index(config.sources.map((s) => s.path));
   console.log("Done.");
   await engine.close();
+  logEvent("info", "cli.index.complete");
 }
 
 async function status() {
@@ -116,6 +136,7 @@ async function status() {
 async function reindex() {
   const config = loadConfig(args[1]);
   const dataDir = config.dataDir;
+  logEvent("info", "cli.reindex.start", { dataDir, sources: config.sources.map((s) => s.path) });
 
   try {
     if (existsSync(dataDir)) {
@@ -130,11 +151,13 @@ async function reindex() {
   await engine.index(config.sources.map((s) => s.path));
   console.log("Reindex complete.");
   await engine.close();
+  logEvent("info", "cli.reindex.complete");
 }
 
 async function doctor() {
   const config = loadConfig(args[1]);
   const fix = args.includes("--fix");
+  logEvent("info", "cli.doctor.start", { dataDir: config.dataDir, fix });
 
   const metadata = new SQLiteMetadataStore({
     path: resolve(config.dataDir, "metadata.db"),
@@ -158,6 +181,12 @@ async function doctor() {
 
   await vectors.close();
   await metadata.close();
+
+  logEvent("info", "cli.doctor.complete", {
+    consistent: report.consistent,
+    missingVectors: report.missingVectors.length,
+    orphanVectors: report.orphanVectors.length,
+  });
 
   if (!report.consistent && fix) {
     console.log("Inconsistency detected — running full reindex (--fix)...");
@@ -190,6 +219,7 @@ Examples:
 }
 
 main().catch((err) => {
+  logError("cli.fatal", err);
   console.error("Fatal error:", err.message);
   process.exit(1);
 });
