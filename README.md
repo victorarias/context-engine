@@ -157,3 +157,7 @@ bun run test:quality
 - `src/server/tools/code-sandbox.ts` — isolated TypeScript sandbox runner
 
 See `ARCHITECTURE.md` and `IMPLEMENTATION_PLAN.md` for detailed design + milestone tracking.
+
+## License
+
+GNU General Public License v3.0 only (`GPL-3.0`). See `LICENSE`.
