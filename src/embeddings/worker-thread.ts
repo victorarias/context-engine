@@ -33,6 +33,7 @@ const backend = ((workerData?.backend as Backend | undefined) ?? "mock") as Back
 const model = (workerData?.model as string | undefined) ?? "nomic-embed-text-v1.5";
 const cacheDir = workerData?.cacheDir as string | undefined;
 const fallbackToMock = (workerData?.fallbackToMock as boolean | undefined) ?? true;
+const forceOnnxInitFailure = (workerData?.forceOnnxInitFailure as boolean | undefined) ?? false;
 
 const providerPromise: Promise<{ provider: WorkerEmbeddingProvider; ready: ReadyMessage }> = createProvider();
 
@@ -81,6 +82,10 @@ async function createProvider(): Promise<{ provider: WorkerEmbeddingProvider; re
   }
 
   try {
+    if (forceOnnxInitFailure) {
+      throw new Error("Forced ONNX init failure");
+    }
+
     const { LocalOnnxEmbedder } = await import("./local-onnx.js");
     const onnx = new LocalOnnxEmbedder({
       model,

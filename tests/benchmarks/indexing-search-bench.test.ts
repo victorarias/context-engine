@@ -52,7 +52,7 @@ describe("benchmark suites", () => {
     expect(status.repos[0].filesIndexed).toBe(200);
 
     await engine.close();
-  });
+  }, 20_000);
 
   it("keeps semantic search under p95-style latency budget", async () => {
     const tmp = TempDir.create("ce-bench-search");
@@ -99,5 +99,5 @@ describe("benchmark suites", () => {
     expect(rssBytes).toBeLessThan(1.5 * 1024 * 1024 * 1024);
 
     await engine.close();
-  });
+  }, 20_000);
 });

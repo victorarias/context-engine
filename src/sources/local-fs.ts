@@ -23,7 +23,14 @@ export class LocalFileScanner implements SourceScanner {
     const excludes = new Set([...(options.exclude ?? []).map(normalizeSimplePattern), ...DEFAULT_EXCLUDES]);
 
     for (const filePath of walkFiles(root, excludes)) {
-      const stat = statSync(filePath);
+      let stat;
+      try {
+        stat = statSync(filePath);
+      } catch {
+        // File may disappear between directory walk and stat (e.g. concurrent cleanup).
+        continue;
+      }
+
       if (!stat.isFile()) continue;
 
       // Skip large files for now (M3 baseline)

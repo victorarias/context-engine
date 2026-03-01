@@ -36,14 +36,12 @@ describe("WorkerEmbeddingProvider", () => {
     expect(provider.isBusy()).toBe(false);
   });
 
-  const itOnnxFallback = process.env.CI ? it.skip : it;
-
-  itOnnxFallback("falls back to mock when ONNX backend is unavailable", async () => {
+  it("falls back to mock when ONNX backend is unavailable", async () => {
     const provider = new WorkerEmbeddingProvider({
       dimensions: 16,
       backend: "onnx",
-      model: "invalid/non-existent-model",
       fallbackToMock: true,
+      forceOnnxInitFailure: true,
     });
     providers.push(provider);
 

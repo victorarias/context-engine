@@ -32,6 +32,7 @@ export interface WorkerEmbeddingProviderOptions {
   model?: string;
   cacheDir?: string;
   fallbackToMock?: boolean;
+  forceOnnxInitFailure?: boolean;
 }
 
 /**
@@ -72,6 +73,7 @@ export class WorkerEmbeddingProvider implements EmbeddingRuntimeProvider {
         model,
         cacheDir: options.cacheDir,
         fallbackToMock: options.fallbackToMock ?? true,
+        forceOnnxInitFailure: options.forceOnnxInitFailure ?? false,
       },
     });
 
