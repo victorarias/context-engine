@@ -20,22 +20,23 @@ Local-first MCP server for code indexing and semantic search.
 bun install
 
 # Index source code (uses context-engine.json if present)
-bun run src/cli.ts index .
+bun run mcp:index
 
 # Start MCP server (STDIO or HTTP via config)
-bun run src/cli.ts serve
+bun run mcp
 
 # Check status
-bun run src/cli.ts status
+bun run mcp:status
 
 # Validate storage consistency
-bun run src/cli.ts doctor
+bun run mcp:doctor
 
 # Full rebuild if needed
 bun run src/cli.ts reindex
 ```
 
-`serve` now performs an initial index and (by default) starts the worktree-aware watcher.
+`bun run mcp` (`serve`) now performs an initial index and (by default) starts the worktree-aware watcher.
+Pass a custom config/path with `bun run mcp -- ./path/to/context-engine.json`.
 `get_recent_changes` now returns real git commit/file history for indexed git roots.
 `search_docs` now returns real matches from configured documentation sources.
 `code_sandbox` runs TypeScript snippets in QuickJS WASM isolation with timeout protection.
