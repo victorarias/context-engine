@@ -34,6 +34,13 @@ async function main() {
   const configPath = args.config ? resolve(args.config) : createFastConfig(projectRoot);
   const logFile = args.logFile ? resolve(args.logFile) : join(tmpdir(), `context-engine-mcp-probe-${Date.now()}.log`);
 
+  if (args.config && !existsSync(configPath)) {
+    console.error("MCP probe: FAIL");
+    console.error(`config: ${configPath}`);
+    console.error(`error: Config file not found`);
+    process.exit(1);
+  }
+
   const env = {
     ...process.env,
     CE_LOG_LEVEL: "debug",
@@ -52,10 +59,13 @@ async function main() {
   const client = new Client({ name: "mcp-probe", version: "1.0.0" });
   const startedAt = performance.now();
   const steps: Array<{ name: string; durationMs: number; detail?: string }> = [];
+  let connected = false;
+  let finalExitCode = 0;
 
   try {
     await runStep("connect", args.stepTimeoutMs, steps, async () => {
       await client.connect(transport);
+      connected = true;
     });
 
     let listedToolCount = 0;
@@ -120,10 +130,17 @@ async function main() {
       }
     }
 
-    process.exitCode = 1;
+    finalExitCode = 1;
   } finally {
-    await client.close().catch(() => undefined);
-    await transport.close().catch(() => undefined);
+    if (connected) {
+      await bestEffortCleanup("client.close", () => client.close(), 800);
+    }
+
+    await bestEffortCleanup("transport.close", () => transport.close(), 800);
+
+    if (finalExitCode !== 0) {
+      process.exit(finalExitCode);
+    }
   }
 }
 
@@ -156,6 +173,15 @@ function withTimeout<T>(promise: Promise<T>, timeoutMs: number, stepName: string
         reject(error);
       });
   });
+}
+
+async function bestEffortCleanup(name: string, fn: () => Promise<unknown>, timeoutMs: number): Promise<void> {
+  try {
+    await withTimeout(fn().then(() => undefined), timeoutMs, `${name} cleanup`);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error(`[mcp-probe] ${name} did not finish cleanly: ${message}`);
+  }
 }
 
 function readLogTail(path: string, lines: number): string[] {
