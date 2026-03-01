@@ -33,6 +33,11 @@ interface ChunkRow {
   blobHash: string;
 }
 
+const REQUIRED_COLUMNS: Array<{ name: string; valueSql: string }> = [
+  { name: "worktreeId", valueSql: "'default-worktree'" },
+  { name: "blobHash", valueSql: "''" },
+];
+
 export class LanceVectorStore implements VectorStore {
   private readonly options: Required<LanceVectorStoreOptions>;
   private connection: Connection | null = null;
@@ -152,6 +157,7 @@ export class LanceVectorStore implements VectorStore {
     const existing = await this.connection.tableNames();
     if (existing.includes(this.options.tableName)) {
       this.table = await this.connection.openTable(this.options.tableName);
+      await this.ensureTableSchema(this.table);
       return this.table;
     }
 
@@ -176,6 +182,18 @@ export class LanceVectorStore implements VectorStore {
 
     await this.table.delete(`id = '${bootstrapId}'`);
     return this.table;
+  }
+
+  private async ensureTableSchema(table: Table): Promise<void> {
+    const schema = await table.schema() as { fields?: Array<{ name?: string }> };
+    const existing = new Set((schema.fields ?? []).map((field) => field.name).filter(Boolean) as string[]);
+
+    const missing = REQUIRED_COLUMNS.filter((column) => !existing.has(column.name));
+    if (missing.length === 0) {
+      return;
+    }
+
+    await table.addColumns(missing);
   }
 }
 

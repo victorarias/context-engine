@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import { join } from "node:path";
+import * as lancedb from "@lancedb/lancedb";
 import { LanceVectorStore } from "../../src/storage/vector-store.js";
 import { TempDir } from "../harness/temp-dir.js";
 import type { Chunk } from "../../src/types.js";
@@ -124,6 +125,55 @@ describe("LanceVectorStore", () => {
     expect(await store.count()).toBe(1);
     await store.delete(["to-delete"]);
     expect(await store.count()).toBe(0);
+
+    await store.close();
+  });
+
+  it("backfills new columns for older LanceDB schemas", async () => {
+    const dir = TempDir.create("ce-lance-legacy");
+    dirs.push(dir);
+
+    const uri = join(dir.path, "lancedb");
+    const connection = await lancedb.connect(uri);
+    const table = await connection.createTable("chunks", [
+      {
+        id: "legacy",
+        vector: [0, 0, 0, 0],
+        content: "legacy content",
+        filePath: "legacy.ts",
+        startLine: 1,
+        endLine: 1,
+        symbolName: "",
+        symbolKind: "",
+        language: "typescript",
+        repoId: "repo1",
+      },
+    ]);
+    table.close();
+    connection.close();
+
+    const store = new LanceVectorStore({ uri, vectorDimensions: 4 });
+    await store.upsert(
+      [new Float32Array([1, 0, 0, 0])],
+      [
+        {
+          id: "new-row",
+          content: "new content",
+          filePath: "new.ts",
+          startLine: 1,
+          endLine: 2,
+          language: "typescript",
+          repoId: "repo1",
+        },
+      ],
+    );
+
+    const filtered = await store.search(new Float32Array([1, 0, 0, 0]), {
+      limit: 10,
+      filter: { worktreeId: "default-worktree" },
+    });
+
+    expect(filtered.some((result) => result.chunkId === "new-row")).toBe(true);
 
     await store.close();
   });
