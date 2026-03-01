@@ -63,5 +63,10 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
+      - name: Install ripgrep (eval differential gate)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ripgrep
+
       - name: Quality suite
         run: bun run test:quality
