@@ -80,7 +80,8 @@ describe("MCP Server HTTP E2E", () => {
     });
 
     const statusText = (status.content[0] as { type: "text"; text: string }).text;
-    expect(statusText).toContain("Indexing: idle");
+    expect(statusText).toContain("Indexing:");
+    expect(statusText.includes("Indexing: idle") || statusText.includes("Indexing: in progress")).toBe(true);
 
     const sandbox = await client.callTool({
       name: "code_sandbox",

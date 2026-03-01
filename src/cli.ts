@@ -59,11 +59,25 @@ async function serve() {
 
   const engine = await ContextEngine.create(config);
 
-  await engine.index(config.sources.map((s) => s.path));
+  void (async () => {
+    try {
+      logEvent("info", "cli.serve.initial_index.start", {
+        sources: config.sources.map((s) => s.path),
+      });
 
-  if (config.watcher.enabled) {
-    await engine.startWatching();
-  }
+      await engine.index(config.sources.map((s) => s.path));
+
+      if (config.watcher.enabled) {
+        await engine.startWatching();
+      }
+
+      logEvent("info", "cli.serve.initial_index.complete", {
+        watcherEnabled: config.watcher.enabled,
+      });
+    } catch (error) {
+      logError("cli.serve.initial_index.failed", error);
+    }
+  })();
 
   const server = createMcpServer(engine);
   const transportType = config.server.transport;
