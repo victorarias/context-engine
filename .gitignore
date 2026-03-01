@@ -1,0 +1,13 @@
+node_modules/
+dist/
+.context-engine/
+
+*.db
+*.sqlite
+*.sqlite3
+*.log
+
+.env
+.env.*
+
+.DS_Store

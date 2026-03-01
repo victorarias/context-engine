@@ -1,0 +1,23 @@
+[
+  {
+    "symbolKind": "class",
+    "symbolName": "SessionManager",
+    "startLine": 1,
+    "endLine": 4,
+    "content": "class SessionManager:\n    def create_session(self, user_id):\n        return {\"user_id\": user_id}"
+  },
+  {
+    "symbolKind": "function",
+    "symbolName": "create_session",
+    "startLine": 2,
+    "endLine": 4,
+    "content": "def create_session(self, user_id):\n        return {\"user_id\": user_id}"
+  },
+  {
+    "symbolKind": "function",
+    "symbolName": "authenticate_user",
+    "startLine": 5,
+    "endLine": 7,
+    "content": "def authenticate_user(email, password):\n    return len(email) > 0"
+  }
+]

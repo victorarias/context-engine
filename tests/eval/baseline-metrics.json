@@ -1,0 +1,7 @@
+{
+  "mrr": 1,
+  "ndcgAt10": 1,
+  "precisionAt5": 0.2,
+  "recallAt10": 1,
+  "maxDropPct": 0.02
+}

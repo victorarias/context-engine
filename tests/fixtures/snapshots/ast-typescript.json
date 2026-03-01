@@ -1,0 +1,38 @@
+[
+  {
+    "symbolKind": "interface",
+    "symbolName": "User",
+    "startLine": 1,
+    "endLine": 1,
+    "content": "export interface User { id: string }"
+  },
+  {
+    "symbolKind": "type",
+    "symbolName": "Token",
+    "startLine": 2,
+    "endLine": 2,
+    "content": "export type Token = { value: string }"
+  },
+  {
+    "symbolKind": "class",
+    "symbolName": "SessionManager",
+    "startLine": 3,
+    "endLine": 5,
+    "content": "export class SessionManager {\n  createSession(userId: string) { return { userId }; }\n}"
+  },
+  {
+    "symbolKind": "method",
+    "symbolName": "createSession",
+    "parentSymbol": "SessionManager",
+    "startLine": 4,
+    "endLine": 4,
+    "content": "createSession(userId: string) { return { userId }; }"
+  },
+  {
+    "symbolKind": "function",
+    "symbolName": "authenticateUser",
+    "startLine": 6,
+    "endLine": 6,
+    "content": "export function authenticateUser(email: string, pass: string) { return email.length > 0 && pass.length > 0; }"
+  }
+]

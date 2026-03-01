@@ -1,0 +1,32 @@
+{
+  "name": "context-engine",
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "build": "bun build src/cli.ts --outdir dist --target bun",
+    "dev": "bun run src/cli.ts",
+    "test": "bun test",
+    "test:unit": "bun test tests/unit/",
+    "test:integration": "bun test tests/integration/",
+    "test:e2e": "bun test tests/e2e/",
+    "test:contract": "bun test tests/contract/",
+    "test:eval": "bun test tests/eval/",
+    "test:regression": "bun test tests/regression/",
+    "test:bench": "bun test tests/benchmarks/",
+    "test:quality": "bun run test:eval && bun run test:bench && bun run test:contract && bun run test:regression",
+    "serve": "bun run src/cli.ts serve"
+  },
+  "dependencies": {
+    "@huggingface/transformers": "^3.8.1",
+    "@lancedb/lancedb": "^0.26.2",
+    "@modelcontextprotocol/sdk": "^1.12.1",
+    "@vscode/tree-sitter-wasm": "^0.3.0",
+    "quickjs-emscripten": "^0.32.0",
+    "tree-sitter-wasms": "^0.1.13",
+    "web-tree-sitter": "^0.26.6"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5.7.0"
+  }
+}

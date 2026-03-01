@@ -1,0 +1,14 @@
+[
+  {
+    "query": "authenticate user login",
+    "relevant": ["auth/login.ts"]
+  },
+  {
+    "query": "session token manager",
+    "relevant": ["auth/session.ts"]
+  },
+  {
+    "query": "hash password",
+    "relevant": ["utils/hash.ts"]
+  }
+]
