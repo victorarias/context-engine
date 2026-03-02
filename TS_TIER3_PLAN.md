@@ -1,6 +1,6 @@
 # TypeScript Tier-3 Dependency Intelligence Plan
 
-Status: planned
+Status: phase 1-4 implemented (ongoing hardening)
 
 ## Goal
 
@@ -16,7 +16,6 @@ Deliver production-grade TypeScript dependency intelligence (TS equivalent of go
 
 ## Non-goals (initial rollout)
 
-- Full symbol references for TS (separate later phase)
 - Runtime-evaluated dynamic import resolution
 - Replacing existing semantic/text indexing pipeline
 

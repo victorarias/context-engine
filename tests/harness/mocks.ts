@@ -170,6 +170,13 @@ export class MockMetadataStore implements MetadataStore {
   async clearDirtyFiles(worktreeId: string) {
     this.dirtyFiles.delete(worktreeId);
   }
+  async getKnownWorktreeIds() {
+    const ids = new Set<string>([
+      ...this.treeEntries.keys(),
+      ...this.dirtyFiles.keys(),
+    ]);
+    return Array.from(ids).sort();
+  }
 
   // Documentation
   async upsertDocChunks(url: string, title: string, chunks: string[]) {

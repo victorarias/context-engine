@@ -41,8 +41,8 @@ bun run src/cli.ts reindex
 `bun run mcp` (`serve`) now performs an initial index and (by default) starts the worktree-aware watcher.
 Pass a custom config/path with `bun run mcp -- ./path/to/context-engine.json`.
 `get_recent_changes` now returns real git commit/file history for indexed git roots.
-`find_importers` finds reverse dependencies (which files import/re-export a target) from the TS semantic graph.
-`find_references` finds symbol usages/call-sites (Go uses `gopls` when available, heuristic fallback otherwise).
+`find_importers` finds reverse dependencies (which files import/re-export a target) via TS semantic graph plus static scan fallback (including Go imports).
+`find_references` finds symbol usages/call-sites (Go via `gopls`, TS/JS via compiler API, heuristic fallback when unresolved).
 `execute` runs isolated TypeScript "code mode" snippets that emit scripted MCP tool calls.
 HTTP MCP transport is supported via `server.transport = "http"`.
 

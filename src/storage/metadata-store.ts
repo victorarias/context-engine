@@ -126,6 +126,19 @@ export class SQLiteMetadataStore implements MetadataStore {
     this.db.query("DELETE FROM dirty_files WHERE worktree_id = ?").run(worktreeId);
   }
 
+  async getKnownWorktreeIds(): Promise<string[]> {
+    const rows = this.db
+      .query(
+        `SELECT DISTINCT worktree_id AS id FROM tree_entries
+         UNION
+         SELECT DISTINCT worktree_id AS id FROM dirty_files
+         ORDER BY id`,
+      )
+      .all() as Array<{ id: string }>;
+
+    return rows.map((row) => row.id).filter(Boolean);
+  }
+
   // Documentation operations
   async upsertDocChunks(url: string, title: string, chunks: string[]): Promise<void> {
     const deleteStmt = this.db.query("DELETE FROM docs_chunks WHERE url = ?");

@@ -192,6 +192,9 @@ function formatStatus(status: Awaited<ReturnType<Engine["status"]>>): string {
     if (status.capabilities.tsDependencies) {
       caps.push(`tsDependencies=${status.capabilities.tsDependencies}`);
     }
+    if (status.capabilities.tsReferences) {
+      caps.push(`tsReferences=${status.capabilities.tsReferences}`);
+    }
     if (caps.length > 0) {
       lines.push(`Capabilities: ${caps.join(", ")}`);
     }
@@ -435,6 +438,7 @@ export function createMcpServer(engine: Engine): McpServer {
   server.registerTool("find_importers", {
     description:
       "What: Reverse dependency lookup (which files import/re-export a target). " +
+      "Uses TS semantic graph plus static import scanning for non-TS files (including Go). " +
       "Use when: scoping downstream refactor impact. " +
       "Prefer over: manual grep over import statements. " +
       "Not for: runtime dynamic-loading analysis.",
@@ -455,7 +459,7 @@ export function createMcpServer(engine: Engine): McpServer {
     description:
       "What: Find symbol usages/call-sites. " +
       "Use when: assessing refactor impact or tracing where an API is used. " +
-      "Prefer over: grep for semantics-aware Go references (uses gopls when target is resolvable). " +
+      "Prefer over: grep for semantics-aware references (Go via gopls, TS/JS via compiler API). " +
       "Not for: declaration lookup (use get_symbols). Pass `filePath` for ambiguous/common symbols.",
     inputSchema: {
       symbol: z.string().describe("Symbol name to find references for (e.g. 'Start', 'NewClient')"),

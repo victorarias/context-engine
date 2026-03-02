@@ -151,6 +151,7 @@ export interface MetadataStore {
   upsertDirtyFile(worktreeId: string, path: string, contentHash: string, chunkIds: string[]): Promise<void>;
   deleteDirtyFile(worktreeId: string, path: string): Promise<void>;
   clearDirtyFiles(worktreeId: string): Promise<void>;
+  getKnownWorktreeIds(): Promise<string[]>;
 
   // Symbol operations
   getSymbols(query: { name?: string; filePath?: string; kind?: SymbolKind; repoId?: string }): Promise<SymbolInfo[]>;
@@ -204,6 +205,7 @@ export interface EngineStatus {
     goReferencesSelection?: "requires-anchor-for-ambiguous-symbols";
     goDependencies?: "native";
     tsDependencies?: "compiler-api";
+    tsReferences?: "compiler-api";
   };
   tsDependencyGraph?: {
     filesIndexed: number;

@@ -72,17 +72,123 @@ describe("ContextEngine", () => {
     await engine.close();
   });
 
-  it("parses Go dependencies and reference queries", async () => {
-    const tmp = TempDir.create("ce-engine-go");
+  it("hydrates TS dependency graph from existing metadata on restart", async () => {
+    const tmp = TempDir.create("ce-engine-ts-hydrate");
     dirs.push(tmp);
 
     const sourceDir = join(tmp.path, "repo", "src");
     mkdirSync(sourceDir, { recursive: true });
 
+    writeFileSync(
+      join(sourceDir, "a.ts"),
+      `export function hello() { return "hi"; }
+`,
+    );
+    writeFileSync(
+      join(sourceDir, "b.ts"),
+      `import { hello } from "./a";
+export const value = hello();
+`,
+    );
+
+    const config = ConfigSchema.parse({
+      sources: [{ path: sourceDir }],
+      dataDir: join(tmp.path, "data"),
+      embedding: {
+        provider: "local",
+        localBackend: "mock",
+        dimensions: 768,
+      },
+    });
+
+    const engine1 = await ContextEngine.create(config);
+    await engine1.index();
+    await engine1.close();
+
+    const engine2 = await ContextEngine.create(config);
+
+    const status = await engine2.status();
+    expect(status.tsDependencyGraph?.filesIndexed ?? 0).toBeGreaterThan(0);
+
+    const refs = await engine2.findReferences("hello", {
+      filePath: "a.ts",
+      limit: 10,
+    });
+
+    expect(refs).toContain("Requested backend: tsserver");
+    expect(refs).toContain("Actual backend: tsserver");
+    expect(refs).toContain("b.ts:2:22");
+
+    await engine2.close();
+  });
+
+  it("resolves TypeScript references with compiler backend", async () => {
+    const tmp = TempDir.create("ce-engine-ts-refs");
+    dirs.push(tmp);
+
+    const sourceDir = join(tmp.path, "repo", "src");
+    mkdirSync(sourceDir, { recursive: true });
+
+    writeFileSync(
+      join(sourceDir, "a.ts"),
+      `export function greet(name: string) {
+  return ` + "`hi ${name}`" + `;
+}
+
+export function localCall() {
+  return greet("local");
+}
+`,
+    );
+
+    writeFileSync(
+      join(sourceDir, "b.ts"),
+      `import { greet } from "./a";
+
+export function remoteCall() {
+  return greet("remote");
+}
+`,
+    );
+
+    const config = ConfigSchema.parse({
+      sources: [{ path: sourceDir }],
+      dataDir: join(tmp.path, "data"),
+      embedding: {
+        provider: "local",
+        localBackend: "mock",
+        dimensions: 768,
+      },
+    });
+
+    const engine = await ContextEngine.create(config);
+    await engine.index();
+
+    const refs = await engine.findReferences("greet", {
+      filePath: "a.ts",
+      limit: 20,
+    });
+
+    expect(refs).toContain("Requested backend: tsserver");
+    expect(refs).toContain("Actual backend: tsserver");
+    expect(refs).toContain("a.ts:6:10");
+    expect(refs).toContain("b.ts:4:10");
+
+    await engine.close();
+  });
+
+  it("parses Go dependencies and reference queries", async () => {
+    const tmp = TempDir.create("ce-engine-go");
+    dirs.push(tmp);
+
+    const sourceDir = join(tmp.path, "repo", "src");
+    mkdirSync(join(sourceDir, "service"), { recursive: true });
+    mkdirSync(join(sourceDir, "cmd"), { recursive: true });
+
     writeFileSync(join(sourceDir, "go.mod"), "module example.com/ce-go\n\ngo 1.22\n");
 
     writeFileSync(
-      join(sourceDir, "service.go"),
+      join(sourceDir, "service", "service.go"),
       `package service
 
 import (
@@ -102,6 +208,22 @@ func Use(s *Service, ctx context.Context) {
 `,
     );
 
+    writeFileSync(
+      join(sourceDir, "cmd", "main.go"),
+      `package main
+
+import (
+  "context"
+  "example.com/ce-go/service"
+)
+
+func main() {
+  svc := &service.Service{}
+  service.Use(svc, context.Background())
+}
+`,
+    );
+
     const config = ConfigSchema.parse({
       sources: [{ path: sourceDir }],
       dataDir: join(tmp.path, "data"),
@@ -115,11 +237,14 @@ func Use(s *Service, ctx context.Context) {
     const engine = await ContextEngine.create(config);
     await engine.index();
 
-    const deps = await engine.getDependencies("service.go");
+    const deps = await engine.getDependencies("service/service.go");
     expect(deps).toContain("context");
     expect(deps).toContain("fmt");
 
-    const refs = await engine.findReferences("Start", { filePath: "service.go", limit: 10 });
+    const goImporters = await engine.findImporters("service/service.go");
+    expect(goImporters).toContain("cmd/main.go");
+
+    const refs = await engine.findReferences("Start", { filePath: "service/service.go", limit: 10 });
     expect(refs).toContain("References for Start");
     expect(refs).toContain("Requested backend: gopls");
 

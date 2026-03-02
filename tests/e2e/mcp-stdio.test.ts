@@ -173,12 +173,13 @@ describe("MCP Server E2E", () => {
   it("find_references returns reference output", async () => {
     const result = (await client.callTool({
       name: "find_references",
-      arguments: { symbol: "ContextEngine", limit: 5 },
+      arguments: { symbol: "ContextEngine", filePath: "src/engine/context-engine.ts", limit: 5 },
     })) as CallToolResult;
 
     expect(result.content).toBeDefined();
     const text = (result.content[0] as { type: "text"; text: string }).text;
     expect(text).toContain("References for");
+    expect(text).toContain("Requested backend: tsserver");
   });
 
   it("status returns engine state", async () => {

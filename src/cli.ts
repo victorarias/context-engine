@@ -167,6 +167,9 @@ async function status() {
     if (s.capabilities.tsDependencies) {
       caps.push(`tsDependencies=${s.capabilities.tsDependencies}`);
     }
+    if (s.capabilities.tsReferences) {
+      caps.push(`tsReferences=${s.capabilities.tsReferences}`);
+    }
     if (caps.length > 0) {
       console.log(`Capabilities: ${caps.join(", ")}`);
     }

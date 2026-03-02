@@ -57,6 +57,7 @@ export class ContextEngine implements Engine {
   private primaryWorktreeId = DEFAULT_WORKTREE_ID;
   private watcher: WorktreeWatcher | null = null;
   private watcherReindexQueued = false;
+  private tsDepsHydrated = false;
 
   private constructor(private readonly config: Config) {
     this.embedder = createEmbeddingProvider(config);
@@ -211,6 +212,10 @@ export class ContextEngine implements Engine {
   }
 
   async findFiles(pattern: string, options?: { worktreeId?: string }): Promise<string[]> {
+    if (!options?.worktreeId) {
+      await this.ensurePrimaryWorktreeSelected();
+    }
+
     const worktreeId = options?.worktreeId ?? this.primaryWorktreeId;
     const entries = await this.metadataStore.getTreeEntries(worktreeId);
     const dirtyFiles = await this.metadataStore.getDirtyFiles(worktreeId);
@@ -236,6 +241,8 @@ export class ContextEngine implements Engine {
   }
 
   async getFileSummary(filePath: string): Promise<string> {
+    await this.ensurePrimaryWorktreeSelected();
+
     const normalized = normalizePathForLookup(filePath, this.indexedRoots);
     if (!normalized) {
       return `Rejected path (outside source roots or secret): ${filePath}`;
@@ -339,6 +346,8 @@ export class ContextEngine implements Engine {
     filePath: string,
     options?: { recursive?: boolean; maxFiles?: number },
   ): Promise<string> {
+    await this.ensurePrimaryWorktreeSelected();
+
     const normalized = normalizePathForLookup(filePath, this.indexedRoots);
     if (!normalized) {
       return `Rejected path (outside source roots or secret): ${filePath}`;
@@ -361,6 +370,8 @@ export class ContextEngine implements Engine {
     if (stats.isDirectory()) {
       return this.getDirectoryDependencies(normalized, resolved, options);
     }
+
+    await this.ensureTsDependencyGraph();
 
     if (isTsLikePath(resolved)) {
       const tsEdges = this.lookupTsEdgesForFile(normalized, resolved);
@@ -388,27 +399,160 @@ export class ContextEngine implements Engine {
   }
 
   async findImporters(target: string, options?: { limit?: number }): Promise<string> {
+    await this.ensureTsDependencyGraph();
+
     const query = target.trim();
     if (!query) {
       return "Missing target for importer search.";
     }
 
+    const limit = Math.max(1, options?.limit ?? 100);
     const normalized = normalizePathForLookup(query, this.indexedRoots) ?? normalizeFilePath(query);
-    const importers = this.tsDeps.findImporters(normalized, {
-      limit: options?.limit,
-    });
+    const resolvedTarget = this.resolveFileOnDisk(normalized);
 
-    if (importers.length === 0) {
+    const tsImporters = new Set<string>();
+    const tsCandidates = new Set<string>([normalized, normalizeFilePath(query)]);
+    if (resolvedTarget) {
+      tsCandidates.add(normalizeFilePath(relative(process.cwd(), resolvedTarget)));
+      for (const root of this.indexedRoots) {
+        tsCandidates.add(normalizeFilePath(relative(resolve(root), resolvedTarget)));
+      }
+    }
+
+    for (const candidate of tsCandidates) {
+      if (!candidate || candidate.startsWith("../")) continue;
+      for (const importer of this.tsDeps.findImporters(candidate, { limit: limit * 2 })) {
+        tsImporters.add(importer);
+      }
+    }
+
+    const staticImporters = await this.findImportersStatic(normalized, resolvedTarget, limit * 2);
+
+    const combined = Array.from(new Set([
+      ...Array.from(tsImporters),
+      ...staticImporters,
+    ])).sort().slice(0, limit);
+
+    if (combined.length === 0) {
       return [
         `Importers for ${query}:`,
-        "No importers found in TS dependency graph.",
+        "No importers found.",
+        "Backends checked: ts-semantic graph + static import scan.",
       ].join("\n");
     }
 
     return [
       `Importers for ${query}:`,
-      ...importers.map((entry) => `- ${entry}`),
+      ...combined.map((entry) => `- ${entry}`),
     ].join("\n");
+  }
+
+  private async findImportersStatic(
+    normalizedTarget: string,
+    resolvedTarget: string | null,
+    limit: number,
+  ): Promise<string[]> {
+    const files = await this.findFiles("", {
+      worktreeId: this.primaryWorktreeId,
+    });
+
+    const targetNoExt = stripCodeExtension(normalizedTarget);
+    const targetDir = normalizedTarget.endsWith(".go")
+      ? normalizeFilePath(dirname(normalizedTarget))
+      : normalizeFilePath(dirname(targetNoExt));
+    const targetLooksLikePath = normalizedTarget.includes("/") || normalizedTarget.includes(".");
+
+    const resolvedCandidates = new Set<string>();
+    if (resolvedTarget) {
+      for (const root of this.indexedRoots) {
+        const rel = normalizeFilePath(relative(resolve(root), resolvedTarget));
+        if (!rel.startsWith("../") && rel !== "..") {
+          resolvedCandidates.add(rel);
+          resolvedCandidates.add(stripCodeExtension(rel));
+          resolvedCandidates.add(normalizeFilePath(dirname(rel)));
+        }
+      }
+    }
+
+    const matches = new Set<string>();
+
+    for (const relativePath of files) {
+      if (matches.size >= limit) break;
+
+      const absolutePath = this.resolveFileOnDisk(relativePath);
+      if (!absolutePath || !existsSync(absolutePath)) continue;
+
+      let content: string;
+      try {
+        content = readFileSync(absolutePath, "utf-8");
+      } catch {
+        continue;
+      }
+
+      const deps = extractDependencies(content, absolutePath, this.indexedRoots);
+      for (const dep of deps) {
+        const normalizedDep = normalizeFilePath(dep.replace(/^pkg:/, ""));
+        if (
+          dependencyMatchesTarget(normalizedDep, {
+            normalizedTarget,
+            targetNoExt,
+            targetDir,
+            targetLooksLikePath,
+            resolvedCandidates,
+          })
+        ) {
+          matches.add(relativePath);
+          break;
+        }
+      }
+    }
+
+    return Array.from(matches).sort().slice(0, limit);
+  }
+
+  private async ensurePrimaryWorktreeSelected(): Promise<void> {
+    if (this.primaryWorktreeId !== DEFAULT_WORKTREE_ID) {
+      return;
+    }
+
+    const currentTree = await this.metadataStore.getTreeEntries(this.primaryWorktreeId);
+    if (currentTree.length > 0) {
+      return;
+    }
+
+    const currentDirty = await this.metadataStore.getDirtyFiles(this.primaryWorktreeId);
+    if (currentDirty.length > 0) {
+      return;
+    }
+
+    const knownWorktrees = await this.metadataStore.getKnownWorktreeIds();
+    if (knownWorktrees.length > 0) {
+      this.primaryWorktreeId = knownWorktrees[0]!;
+    }
+  }
+
+  private async ensureTsDependencyGraph(): Promise<void> {
+    if (this.tsDepsHydrated) {
+      return;
+    }
+
+    await this.ensurePrimaryWorktreeSelected();
+
+    const treeEntries = await this.metadataStore.getTreeEntries(this.primaryWorktreeId);
+    const dirtyEntries = await this.metadataStore.getDirtyFiles(this.primaryWorktreeId);
+    const visible = Array.from(new Set([
+      ...treeEntries.map((entry) => entry.path),
+      ...dirtyEntries.map((entry) => entry.path),
+    ])).sort();
+
+    if (visible.length === 0) {
+      this.tsDepsHydrated = true;
+      return;
+    }
+
+    this.tsDeps.setRoots(this.indexedRoots);
+    this.tsDeps.rebuild(visible);
+    this.tsDepsHydrated = true;
   }
 
   private async buildDependencyPathSuggestion(normalizedPath: string): Promise<string> {
@@ -456,6 +600,8 @@ export class ContextEngine implements Engine {
     _absoluteDir: string,
     options?: { recursive?: boolean; maxFiles?: number },
   ): Promise<string> {
+    await this.ensureTsDependencyGraph();
+
     const recursive = options?.recursive ?? false;
     const maxFiles = Math.max(1, Math.min(500, Math.floor(options?.maxFiles ?? 50)));
 
@@ -544,6 +690,8 @@ export class ContextEngine implements Engine {
     symbol: string,
     options?: { filePath?: string; includeDeclaration?: boolean; limit?: number },
   ): Promise<string> {
+    await this.ensureTsDependencyGraph();
+
     const query = symbol.trim();
     if (!query) {
       return "Missing symbol for reference search.";
@@ -551,19 +699,82 @@ export class ContextEngine implements Engine {
 
     const limit = Math.max(1, options?.limit ?? 50);
     const includeDeclaration = options?.includeDeclaration ?? false;
-    const goResolution = await this.resolveGoReferenceTarget(query, options?.filePath);
+    const normalizedFilePath = options?.filePath ? normalizeFilePath(options.filePath) : undefined;
 
+    const explicitGo = normalizedFilePath?.endsWith(".go") === true;
+    const explicitTs = normalizedFilePath ? isTsLikePath(normalizedFilePath) : false;
+
+    if (explicitTs) {
+      if (!this.resolveFileOnDisk(normalizedFilePath!)) {
+        return this.formatFindReferencesResponse({
+          symbol: query,
+          requestedBackend: "tsserver",
+          actualBackend: "none",
+          references: [],
+          fallbackReason: `TS file not found on disk: ${normalizedFilePath}`,
+          guidance: "Check the path and ensure it is inside indexed source roots.",
+        });
+      }
+
+      const tsResult = this.tsDeps.findReferences(query, {
+        filePath: normalizedFilePath,
+        includeDeclaration,
+        limit,
+      });
+
+      if (tsResult.resolution.kind === "ambiguous") {
+        return this.formatFindReferencesResponse({
+          symbol: query,
+          requestedBackend: "tsserver",
+          actualBackend: "none",
+          references: [],
+          fallbackReason: tsResult.resolution.reason,
+          candidates: tsResult.resolution.candidates,
+          guidance: "Provide `filePath` + exact exported symbol name to run TypeScript references precisely.",
+        });
+      }
+
+      if (tsResult.resolution.kind === "resolved" && tsResult.references.length > 0) {
+        return this.formatFindReferencesResponse({
+          symbol: query,
+          requestedBackend: "tsserver",
+          actualBackend: "tsserver",
+          references: tsResult.references,
+          candidates: tsResult.resolution.candidates,
+        });
+      }
+
+      if (tsResult.resolution.kind === "resolved" && tsResult.references.length === 0) {
+        return this.formatFindReferencesResponse({
+          symbol: query,
+          requestedBackend: "tsserver",
+          actualBackend: "none",
+          references: [],
+          fallbackReason: `TypeScript backend returned 0 references for ${tsResult.resolution.declaration.filePath}:${tsResult.resolution.declaration.line}`,
+          candidates: tsResult.resolution.candidates,
+          guidance: "Try includeDeclaration=true or specify a different anchor filePath if symbol shadowing is involved.",
+        });
+      }
+
+      return this.formatFindReferencesResponse({
+        symbol: query,
+        requestedBackend: "tsserver",
+        actualBackend: "none",
+        references: [],
+        fallbackReason: tsResult.resolution.reason,
+        candidates: tsResult.resolution.candidates,
+      });
+    }
+
+    const goResolution = await this.resolveGoReferenceTarget(query, normalizedFilePath);
     const goplsInstalled = isGoplsAvailable();
-    const requestedBackend: "gopls" | "heuristic" =
-      goplsInstalled && (goResolution.kind !== "unresolved" || options?.filePath?.endsWith(".go") === true)
-        ? "gopls"
-        : "heuristic";
+    const shouldTryGo = goplsInstalled && (goResolution.kind !== "unresolved" || explicitGo);
 
-    if (requestedBackend === "gopls") {
+    if (shouldTryGo) {
       if (goResolution.kind === "ambiguous") {
         return this.formatFindReferencesResponse({
           symbol: query,
-          requestedBackend,
+          requestedBackend: "gopls",
           actualBackend: "none",
           fallbackReason: goResolution.reason,
           references: [],
@@ -582,7 +793,7 @@ export class ContextEngine implements Engine {
           if (references.length > 0) {
             return this.formatFindReferencesResponse({
               symbol: query,
-              requestedBackend,
+              requestedBackend: "gopls",
               actualBackend: "gopls",
               references,
               candidates: goResolution.candidates,
@@ -590,13 +801,13 @@ export class ContextEngine implements Engine {
           }
 
           const fallback = await this.findReferencesHeuristic(query, {
-            filePath: options?.filePath,
+            filePath: normalizedFilePath,
             limit,
           });
 
           return this.formatFindReferencesResponse({
             symbol: query,
-            requestedBackend,
+            requestedBackend: "gopls",
             actualBackend: "heuristic",
             fallbackReason: `gopls returned 0 references for ${goResolution.target.absolutePath}:${goResolution.target.line}:${goResolution.target.column}`,
             references: fallback,
@@ -604,13 +815,13 @@ export class ContextEngine implements Engine {
           });
         } catch (error) {
           const fallback = await this.findReferencesHeuristic(query, {
-            filePath: options?.filePath,
+            filePath: normalizedFilePath,
             limit,
           });
 
           return this.formatFindReferencesResponse({
             symbol: query,
-            requestedBackend,
+            requestedBackend: "gopls",
             actualBackend: "heuristic",
             fallbackReason: `gopls failed: ${error instanceof Error ? error.message : String(error)}`,
             references: fallback,
@@ -620,13 +831,13 @@ export class ContextEngine implements Engine {
       }
 
       const fallback = await this.findReferencesHeuristic(query, {
-        filePath: options?.filePath,
+        filePath: normalizedFilePath,
         limit,
       });
 
       return this.formatFindReferencesResponse({
         symbol: query,
-        requestedBackend,
+        requestedBackend: "gopls",
         actualBackend: "heuristic",
         fallbackReason: goResolution.reason,
         references: fallback,
@@ -634,24 +845,71 @@ export class ContextEngine implements Engine {
       });
     }
 
-    const references = await this.findReferencesHeuristic(query, {
-      filePath: options?.filePath,
+    const tsResult = this.tsDeps.findReferences(query, {
+      filePath: normalizedFilePath,
+      includeDeclaration,
+      limit,
+    });
+
+    if (tsResult.resolution.kind === "ambiguous") {
+      return this.formatFindReferencesResponse({
+        symbol: query,
+        requestedBackend: "tsserver",
+        actualBackend: "none",
+        references: [],
+        fallbackReason: tsResult.resolution.reason,
+        candidates: tsResult.resolution.candidates,
+        guidance: "Provide `filePath` to the exact TypeScript declaration to disambiguate.",
+      });
+    }
+
+    if (tsResult.resolution.kind === "resolved") {
+      if (tsResult.references.length > 0) {
+        return this.formatFindReferencesResponse({
+          symbol: query,
+          requestedBackend: "tsserver",
+          actualBackend: "tsserver",
+          references: tsResult.references,
+          candidates: tsResult.resolution.candidates,
+        });
+      }
+
+      const fallback = await this.findReferencesHeuristic(query, {
+        filePath: normalizedFilePath,
+        limit,
+      });
+
+      return this.formatFindReferencesResponse({
+        symbol: query,
+        requestedBackend: "tsserver",
+        actualBackend: "heuristic",
+        references: fallback,
+        fallbackReason: `TypeScript backend returned 0 references for ${tsResult.resolution.declaration.filePath}:${tsResult.resolution.declaration.line}`,
+        candidates: tsResult.resolution.candidates,
+      });
+    }
+
+    const heuristic = await this.findReferencesHeuristic(query, {
+      filePath: normalizedFilePath,
       limit,
     });
 
     return this.formatFindReferencesResponse({
       symbol: query,
-      requestedBackend,
+      requestedBackend: "heuristic",
       actualBackend: "heuristic",
-      references,
-      fallbackReason: references.length === 0 ? "No symbol-service backend selected for this query." : undefined,
+      references: heuristic,
+      fallbackReason: heuristic.length === 0
+        ? `No symbol-service backend selected for this query. (${tsResult.resolution.reason})`
+        : tsResult.resolution.reason,
+      candidates: tsResult.resolution.candidates,
     });
   }
 
   private formatFindReferencesResponse(params: {
     symbol: string;
-    requestedBackend: "gopls" | "heuristic";
-    actualBackend: "gopls" | "heuristic" | "none";
+    requestedBackend: "gopls" | "tsserver" | "heuristic";
+    actualBackend: "gopls" | "tsserver" | "heuristic" | "none";
     references: string[];
     fallbackReason?: string;
     candidates?: string[];
@@ -711,6 +969,8 @@ export class ContextEngine implements Engine {
   }
 
   async status(): Promise<EngineStatus> {
+    await this.ensurePrimaryWorktreeSelected();
+
     let chunksStored = 0;
     try {
       chunksStored = await this.vectorStore.count();
@@ -748,6 +1008,7 @@ export class ContextEngine implements Engine {
       languageFileCounts[language] = (languageFileCounts[language] ?? 0) + 1;
     }
 
+    await this.ensureTsDependencyGraph();
     const tsStats = this.tsDeps.getStats();
 
     return {
@@ -771,6 +1032,7 @@ export class ContextEngine implements Engine {
         goReferencesSelection: "requires-anchor-for-ambiguous-symbols",
         goDependencies: "native",
         tsDependencies: "compiler-api",
+        tsReferences: "compiler-api",
       },
       tsDependencyGraph: {
         filesIndexed: tsStats.filesIndexed,
@@ -787,6 +1049,7 @@ export class ContextEngine implements Engine {
     const roots = (dirs?.length ? dirs : this.config.sources.map((s) => s.path)).map((d) => resolve(d));
     this.indexedRoots = roots;
     this.tsDeps.setRoots(roots);
+    this.tsDepsHydrated = false;
 
     const startedAt = Date.now();
     let scannedFiles = 0;
@@ -1030,6 +1293,7 @@ export class ContextEngine implements Engine {
     ])).sort();
 
     this.tsDeps.rebuild(visible);
+    this.tsDepsHydrated = true;
   }
 
   private async indexDocs(): Promise<void> {
@@ -1439,6 +1703,44 @@ function formatTsEdges(edges: TsDependencyEdge[]): string[] {
   }
 
   return lines;
+}
+
+function stripCodeExtension(path: string): string {
+  return path.replace(/(?:\.d\.ts|\.tsx|\.ts|\.mts|\.cts|\.jsx|\.js|\.mjs|\.cjs|\.go|\.py|\.rs|\.kt|\.kts|\.java)$/i, "");
+}
+
+function dependencyMatchesTarget(
+  dep: string,
+  context: {
+    normalizedTarget: string;
+    targetNoExt: string;
+    targetDir: string;
+    targetLooksLikePath: boolean;
+    resolvedCandidates: Set<string>;
+  },
+): boolean {
+  if (!dep) return false;
+
+  if (dep === context.normalizedTarget || dep === context.targetNoExt) {
+    return true;
+  }
+
+  if (context.resolvedCandidates.has(dep)) {
+    return true;
+  }
+
+  if (context.targetLooksLikePath) {
+    if (
+      dep.endsWith(`/${context.normalizedTarget}`) ||
+      dep.endsWith(`/${context.targetNoExt}`) ||
+      dep === context.targetDir ||
+      dep.endsWith(`/${context.targetDir}`)
+    ) {
+      return true;
+    }
+  }
+
+  return false;
 }
 
 function extractDependencies(content: string, filePath?: string, roots: string[] = []): string[] {
