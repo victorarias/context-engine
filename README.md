@@ -40,66 +40,102 @@ It **indexes your entire codebase** — code, symbols, git history, even documen
 
 - [Bun](https://bun.sh/) (v1.0+)
 
-### Install & run
+### Install
+
+Clone Context Engine anywhere on your machine — it doesn't need to live inside your project:
 
 ```bash
-git clone https://github.com/victorarias/context-engine.git
-cd context-engine
+# Install it wherever you keep tools
+git clone https://github.com/victorarias/context-engine.git ~/tools/context-engine
+cd ~/tools/context-engine
 bun install
 ```
 
-Index your project and start the server:
+### How it knows what to index
+
+Context Engine is a **standalone tool** that can index any project. There are two separate paths:
+
+- **Tool path** — where you cloned Context Engine (e.g. `~/tools/context-engine`)
+- **Project path** — the codebase you want to index (e.g. `~/projects/my-app`)
+
+You tell it which project to index in one of three ways:
 
 ```bash
-# Index a codebase
-bun run src/cli.ts index /path/to/your/project
+# 1. Pass the project path directly
+bun run ~/tools/context-engine/src/cli.ts serve ~/projects/my-app
 
-# Start the MCP server (indexes on startup + watches for changes)
-bun run src/cli.ts serve
+# 2. Pass a config file inside your project
+bun run ~/tools/context-engine/src/cli.ts serve ~/projects/my-app/context-engine.json
+
+# 3. Run from your project directory (indexes cwd by default)
+cd ~/projects/my-app
+bun run ~/tools/context-engine/src/cli.ts serve
 ```
 
-That's it. The server is now running on STDIO, ready for an agent to connect.
+If no config file is found, Context Engine indexes the target directory with sensible defaults (local ONNX embeddings, file watcher enabled, common directories like `node_modules` excluded).
 
 ### Useful commands
 
 ```bash
-bun run src/cli.ts serve     # Start MCP server (STDIO or HTTP)
-bun run src/cli.ts index .   # Index current directory
-bun run src/cli.ts status    # Check index status
-bun run src/cli.ts reindex   # Full rebuild
-bun run src/cli.ts doctor    # Validate storage consistency
+# All commands accept a project path or config file as the last argument
+bun run ~/tools/context-engine/src/cli.ts serve [path]     # Start MCP server
+bun run ~/tools/context-engine/src/cli.ts index [path]     # Index without starting server
+bun run ~/tools/context-engine/src/cli.ts status           # Check index status
+bun run ~/tools/context-engine/src/cli.ts reindex          # Full rebuild
+bun run ~/tools/context-engine/src/cli.ts doctor           # Validate storage consistency
 ```
 
 ---
 
 ## Connect to Your Agent
 
-Context Engine speaks MCP, so it plugs into any agent that supports MCP servers. Here's how to set it up for the most popular ones:
+Context Engine speaks MCP, so it plugs into any agent that supports MCP servers.
+
+> **Key concept:** your MCP config points to the Context Engine *tool* and tells it which *project* to index. You can do this via `cwd` (the agent runs the server from your project directory) or by passing the project path explicitly.
 
 ### Claude Code (Claude CLI)
 
-Add to your `~/.claude/claude_desktop_config.json` (or project-level `.mcp.json`):
+**Option A — project-level `.mcp.json`** (recommended)
+
+Create a `.mcp.json` in your project root (`~/projects/my-app/.mcp.json`):
 
 ```json
 {
   "mcpServers": {
     "context-engine": {
       "command": "bun",
-      "args": ["run", "/absolute/path/to/context-engine/src/cli.ts", "serve"],
-      "cwd": "/path/to/your/project"
+      "args": ["run", "/home/you/tools/context-engine/src/cli.ts", "serve"]
     }
   }
 }
 ```
 
-Or create a `.mcp.json` in your project root:
+When Claude opens this project, `cwd` is automatically set to the project root, so Context Engine indexes it.
+
+**Option B — global config with explicit project path**
+
+Add to `~/.claude/claude_desktop_config.json`:
 
 ```json
 {
   "mcpServers": {
     "context-engine": {
       "command": "bun",
-      "args": ["run", "/absolute/path/to/context-engine/src/cli.ts", "serve"]
+      "args": ["run", "/home/you/tools/context-engine/src/cli.ts", "serve", "/home/you/projects/my-app"]
+    }
+  }
+}
+```
+
+**Option C — global config with `cwd`**
+
+```json
+{
+  "mcpServers": {
+    "context-engine": {
+      "command": "bun",
+      "args": ["run", "/home/you/tools/context-engine/src/cli.ts", "serve"],
+      "cwd": "/home/you/projects/my-app"
     }
   }
 }
@@ -107,18 +143,20 @@ Or create a `.mcp.json` in your project root:
 
 ### Cursor
 
-Go to **Settings → MCP Servers → Add Server** and configure:
+Go to **Settings → MCP Servers → Add Server**:
 
 ```json
 {
   "mcpServers": {
     "context-engine": {
       "command": "bun",
-      "args": ["run", "/absolute/path/to/context-engine/src/cli.ts", "serve"]
+      "args": ["run", "/home/you/tools/context-engine/src/cli.ts", "serve"]
     }
   }
 }
 ```
+
+Cursor sets `cwd` to the open workspace, so Context Engine indexes whatever project you have open.
 
 ### Zed
 
@@ -130,18 +168,16 @@ Add to your Zed settings (`~/.config/zed/settings.json`):
     "context-engine": {
       "command": {
         "path": "bun",
-        "args": ["run", "/absolute/path/to/context-engine/src/cli.ts", "serve"]
+        "args": ["run", "/home/you/tools/context-engine/src/cli.ts", "serve"]
       }
     }
   }
 }
 ```
 
-### HTTP Mode (Any Client)
+### HTTP Mode
 
-If your agent supports HTTP-based MCP, you can run Context Engine as an HTTP server:
-
-Create a `context-engine.json` in your project root:
+For agents that support HTTP-based MCP, create a `context-engine.json` in your project:
 
 ```json
 {
@@ -157,17 +193,17 @@ Create a `context-engine.json` in your project root:
 Then start the server:
 
 ```bash
-bun run src/cli.ts serve ./context-engine.json
+bun run ~/tools/context-engine/src/cli.ts serve ~/projects/my-app/context-engine.json
 ```
 
 The MCP endpoint will be available at `http://127.0.0.1:3777`.
 
 ### Generic MCP Client
 
-Context Engine works with **any MCP-compatible client**. The server communicates via STDIO by default (or Streamable HTTP). Just point your client at:
+Context Engine works with **any MCP-compatible client**. The server communicates via STDIO by default (or Streamable HTTP). Point your client at:
 
 ```bash
-bun run /path/to/context-engine/src/cli.ts serve
+bun run /path/to/context-engine/src/cli.ts serve [/path/to/project]
 ```
 
 ---
