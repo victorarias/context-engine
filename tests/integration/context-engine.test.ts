@@ -383,7 +383,7 @@ func main() {
     expect(typeRefs).not.toContain("gopls failed");
 
     const ambiguous = await engine.findReferences("Sta", { limit: 10 });
-    expect(ambiguous).toContain("Actual backend: none");
+    expect(ambiguous).toContain("Actual backend: heuristic");
     expect(ambiguous).toContain("Candidate declarations:");
     expect(ambiguous).toContain("Guidance: Provide `filePath`");
 

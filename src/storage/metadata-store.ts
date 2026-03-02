@@ -196,6 +196,7 @@ export class SQLiteMetadataStore implements MetadataStore {
     filePath?: string;
     kind?: SymbolKind;
     repoId?: string;
+    limit?: number;
   }): Promise<SymbolInfo[]> {
     const where: string[] = [];
     const params: unknown[] = [];
@@ -217,14 +218,17 @@ export class SQLiteMetadataStore implements MetadataStore {
       params.push(query.repoId);
     }
 
+    const limit = Math.max(1, Math.min(500, Math.floor(query.limit ?? 200)));
+
     const sql = `
       SELECT name, kind, file_path, start_line, end_line, repo_id
       FROM symbols
       ${where.length ? `WHERE ${where.join(" AND ")}` : ""}
       ORDER BY name, file_path, start_line
+      LIMIT ?
     `;
 
-    const rows = this.db.query(sql).all(...params) as Array<{
+    const rows = this.db.query(sql).all(...params, limit) as Array<{
       name: string;
       kind: SymbolKind;
       file_path: string;

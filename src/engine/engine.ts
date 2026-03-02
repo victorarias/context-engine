@@ -1,11 +1,11 @@
 import type { SearchResult, SymbolInfo, EngineStatus } from "../types.js";
 
 export interface Engine {
-  search(query: string, options?: { worktreeId?: string; limit?: number }): Promise<SearchResult[]>;
+  search(query: string, options?: { worktreeId?: string; limit?: number; minScore?: number }): Promise<SearchResult[]>;
   findFiles(pattern: string, options?: { worktreeId?: string }): Promise<string[]>;
-  getSymbols(query: { name?: string; filePath?: string; kind?: string }): Promise<SymbolInfo[]>;
+  getSymbols(query: { name?: string; filePath?: string; kind?: string; limit?: number }): Promise<SymbolInfo[]>;
   getFileSummary(filePath: string): Promise<string>;
-  getRecentChanges(query?: string): Promise<string>;
+  getRecentChanges(options?: string | { query?: string; limit?: number; since?: string }): Promise<string>;
   getDependencies(filePath: string, options?: { recursive?: boolean; maxFiles?: number }): Promise<string>;
   findImporters(target: string, options?: { limit?: number }): Promise<string>;
   findReferences(symbol: string, options?: { filePath?: string; includeDeclaration?: boolean; limit?: number }): Promise<string>;
@@ -21,7 +21,7 @@ export interface Engine {
  * implementations as later milestones land.
  */
 export class StubEngine implements Engine {
-  async search(query: string, options?: { limit?: number }): Promise<SearchResult[]> {
+  async search(query: string, options?: { limit?: number; minScore?: number }): Promise<SearchResult[]> {
     return [
       {
         filePath: "src/example.ts",
@@ -39,7 +39,7 @@ export class StubEngine implements Engine {
     return [`src/placeholder-match-for-${pattern}`];
   }
 
-  async getSymbols(query: { name?: string; filePath?: string }): Promise<SymbolInfo[]> {
+  async getSymbols(query: { name?: string; filePath?: string; kind?: string; limit?: number }): Promise<SymbolInfo[]> {
     return [
       {
         name: query.name ?? "exampleFunction",
@@ -56,7 +56,8 @@ export class StubEngine implements Engine {
     return `Summary of ${filePath}:\n- This is a placeholder summary\n- Real implementation in Milestone 3+`;
   }
 
-  async getRecentChanges(query?: string): Promise<string> {
+  async getRecentChanges(options?: string | { query?: string; limit?: number; since?: string }): Promise<string> {
+    const query = typeof options === "string" ? options : options?.query;
     return `Recent changes${query ? ` related to "${query}"` : ""}:\n- (placeholder — git history indexing not yet implemented)`;
   }
 

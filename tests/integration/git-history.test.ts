@@ -53,6 +53,14 @@ describe("Git history connector", () => {
     expect(filtered).toContain("refactor session token handling");
     expect(filtered).not.toContain("add auth login flow");
 
+    const limited = await engine.getRecentChanges({ limit: 1 });
+    expect(limited).toContain("Filters: limit=1");
+    expect(limited).toContain("refactor session token handling");
+    expect(limited).not.toContain("add auth login flow");
+
+    const sinceFuture = await engine.getRecentChanges({ since: "2100-01-01" });
+    expect(sinceFuture).toContain("Filters: limit=20, since=2100-01-01");
+
     await engine.close();
   });
 

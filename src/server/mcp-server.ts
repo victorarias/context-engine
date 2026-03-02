@@ -68,6 +68,19 @@ const SCRIPTABLE_TOOL_NAMES = [
   "status",
 ] as const;
 
+const SYMBOL_KIND_VALUES = [
+  "function",
+  "method",
+  "class",
+  "interface",
+  "type",
+  "enum",
+  "variable",
+  "module",
+  "namespace",
+  "other",
+] as const;
+
 type ScriptableToolName = (typeof SCRIPTABLE_TOOL_NAMES)[number];
 
 type ScriptedToolCall = {
@@ -135,6 +148,12 @@ function optionalNumber(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) ? value : undefined;
 }
 
+function optionalAliasNumber(args: Record<string, unknown>, camel: string, snake: string): number | undefined {
+  const camelValue = optionalNumber(args[camel]);
+  if (camelValue !== undefined) return camelValue;
+  return optionalNumber(args[snake]);
+}
+
 function requiredString(value: unknown, field: string): string {
   if (typeof value === "string" && value.trim()) {
     return value;
@@ -148,14 +167,17 @@ function formatSearchResults(results: Awaited<ReturnType<Engine["search"]>>): st
     return "No results found.";
   }
 
-  return results
-    .map((r, i) => {
+  const scoreGuidance = "Score note: higher is better, but scores are relative ranking signals for this query (not calibrated probabilities).";
+
+  return [
+    scoreGuidance,
+    ...results.map((r, i) => {
       const header = `### ${i + 1}. ${r.filePath}:${r.startLine}-${r.endLine}` +
         (r.symbolName ? ` (${r.symbolKind}: ${r.symbolName})` : "") +
         ` [score: ${r.score.toFixed(3)}]`;
       return `${header}\n\`\`\`${r.language}\n${r.content}\n\`\`\``;
-    })
-    .join("\n\n");
+    }),
+  ].join("\n\n");
 }
 
 function formatStatus(status: Awaited<ReturnType<Engine["status"]>>): string {
@@ -211,7 +233,7 @@ function formatStatus(status: Awaited<ReturnType<Engine["status"]>>): string {
 
   if (status.queryLatencyMs) {
     const formatLatency = (entry: { count: number; p50: number; p95: number }) =>
-      entry.count > 0 ? `${entry.p50}/${entry.p95}` : "n/a";
+      entry.count > 0 ? `${entry.p50}/${entry.p95}` : "no data yet";
 
     lines.push(
       `Latency (ms): deps p50/p95=${formatLatency(status.queryLatencyMs.getDependencies)}, importers p50/p95=${formatLatency(status.queryLatencyMs.findImporters)}, refs p50/p95=${formatLatency(status.queryLatencyMs.findReferences)}`,
@@ -226,8 +248,9 @@ async function executeScriptedCall(engine: Engine, call: ScriptedToolCall): Prom
     case "semantic_search": {
       const query = requiredString(call.args.query, "query");
       const limit = optionalNumber(call.args.limit);
+      const minScore = optionalAliasNumber(call.args, "minScore", "min_score");
       const worktreeId = optionalString(call.args.worktreeId);
-      const results = await engine.search(query, { limit, worktreeId });
+      const results = await engine.search(query, { limit, minScore, worktreeId });
       return formatSearchResults(results);
     }
 
@@ -243,6 +266,7 @@ async function executeScriptedCall(engine: Engine, call: ScriptedToolCall): Prom
         name: optionalString(call.args.name),
         filePath: optionalString(call.args.filePath),
         kind: optionalString(call.args.kind),
+        limit: optionalNumber(call.args.limit),
       });
 
       if (symbols.length === 0) {
@@ -261,7 +285,9 @@ async function executeScriptedCall(engine: Engine, call: ScriptedToolCall): Prom
 
     case "get_recent_changes": {
       const query = optionalString(call.args.query);
-      return engine.getRecentChanges(query);
+      const limit = optionalNumber(call.args.limit);
+      const since = optionalString(call.args.since);
+      return engine.getRecentChanges({ query, limit, since });
     }
 
     case "get_dependencies": {
@@ -324,15 +350,19 @@ export function createMcpServer(engine: Engine): McpServer {
       "~80-line windows with overlap otherwise). " +
       "Use when: you know behavior/intent but not exact identifiers. " +
       "Prefer over: grep for exploratory discovery. " +
-      "Not for: exact literal matches or usage counting.",
+      "Not for: exact literal matches or usage counting. Scores are relative ranking signals per query.",
     inputSchema: {
       query: z.string().describe("Natural language query (e.g. 'how auth tokens are refreshed')"),
       limit: z.number().optional().default(10).describe("Max results to return"),
+      minScore: z.number().optional().describe("Optional minimum score filter (heuristic threshold; compare scores only within the same query)."),
+      min_score: z.number().optional().describe("Alias for minScore."),
       worktreeId: z.string().optional().describe("Scope search to a specific worktree"),
     },
   }, async (args) => withToolLogging("semantic_search", args, async () => {
+    const minScore = args.minScore ?? args.min_score;
     const results = await engine.search(args.query, {
       limit: args.limit,
+      minScore,
       worktreeId: args.worktreeId,
     });
 
@@ -344,12 +374,12 @@ export function createMcpServer(engine: Engine): McpServer {
   server.registerTool("find_files", {
     description:
       "What: Find files from the current index (configured source roots + visible worktree overlay), " +
-      "by glob or substring. " +
+      "by glob or substring matched against full indexed paths (basename-only globs like '*.ts' are supported). " +
       "Use when: you want index-scoped discovery consistent with other context-engine tools. " +
       "Prefer over: filesystem glob when index scope matters. " +
       "Not for: searching file contents (or discovering files not yet indexed).",
     inputSchema: {
-      pattern: z.string().describe("Glob pattern or file name substring (e.g. '*.ts', 'auth')"),
+      pattern: z.string().describe("Glob pattern or substring matched against full indexed paths (e.g. '*.ts', 'src/auth')."),
       worktreeId: z.string().optional().describe("Scope to a specific worktree"),
     },
   }, async (args) => withToolLogging("find_files", args, async () => {
@@ -368,17 +398,23 @@ export function createMcpServer(engine: Engine): McpServer {
 
   server.registerTool("get_symbols", {
     description:
-      "What: Lookup symbol definitions (function/class/interface/type) by name, kind, or file. " +
+      "What: Lookup symbol definitions (function/class/interface/type/etc.) by name, kind, and/or file path. " +
       "Use when: you need definition locations quickly. " +
       "Prefer over: grep for definition lookups. " +
       "Not for: finding all usages/call-sites.",
     inputSchema: {
-      name: z.string().optional().describe("Symbol name (partial match)"),
-      filePath: z.string().optional().describe("File path to list symbols from"),
-      kind: z.string().optional().describe("Symbol kind: function, class, interface, type, etc."),
+      name: z.string().optional().describe("Symbol name (partial match)."),
+      filePath: z.string().optional().describe("Filter to symbols declared in this exact indexed path."),
+      kind: z.enum(SYMBOL_KIND_VALUES).optional().describe("Symbol kind filter."),
+      limit: z.number().optional().default(50).describe("Maximum symbols to return."),
     },
   }, async (args) => withToolLogging("get_symbols", args, async () => {
-    const symbols = await engine.getSymbols(args);
+    const symbols = await engine.getSymbols({
+      name: args.name,
+      filePath: args.filePath,
+      kind: args.kind,
+      limit: args.limit,
+    });
 
     if (symbols.length === 0) {
       return { content: [{ type: "text", text: "No symbols found." }] };
@@ -411,15 +447,21 @@ export function createMcpServer(engine: Engine): McpServer {
 
   server.registerTool("get_recent_changes", {
     description:
-      "What: Summarize recent commits and touched files across indexed git roots (optionally filtered). " +
+      "What: Summarize recent commits and touched files across indexed git roots (optionally filtered by query and date window). " +
       "Use when: you need quick historical context around a feature/topic. " +
       "Prefer over: raw git log for fast orientation. " +
       "Not for: exact patch/blame-level inspection.",
     inputSchema: {
-      query: z.string().optional().describe("Filter changes related to this topic"),
+      query: z.string().optional().describe("Filter changes related to this topic."),
+      limit: z.number().optional().default(20).describe("Maximum commits to return after filtering."),
+      since: z.string().optional().describe("Optional git --since expression (e.g. '7 days ago', '2026-01-01')."),
     },
   }, async (args) => withToolLogging("get_recent_changes", args, async () => {
-    const changes = await engine.getRecentChanges(args.query);
+    const changes = await engine.getRecentChanges({
+      query: args.query,
+      limit: args.limit,
+      since: args.since,
+    });
     return { content: [{ type: "text", text: changes }] };
   }));
 
@@ -471,11 +513,11 @@ export function createMcpServer(engine: Engine): McpServer {
     description:
       "What: Find symbol usages/call-sites. " +
       "Use when: assessing refactor impact or tracing where an API is used. " +
-      "Prefer over: grep for semantics-aware references (Go via gopls, TS/JS via compiler API). " +
-      "Not for: declaration lookup (use get_symbols). Pass `filePath` for ambiguous/common symbols.",
+      "Prefer over: grep for semantics-aware references (Go via gopls, TS/JS via compiler API, heuristic fallback when unresolved). " +
+      "Not for: declaration lookup (use get_symbols). For common/ambiguous symbols, pass `filePath` to the declaration for high precision.",
     inputSchema: {
       symbol: z.string().describe("Symbol name to find references for (e.g. 'Start', 'NewClient')"),
-      filePath: z.string().optional().describe("Optional file path containing the declaration (improves precision)."),
+      filePath: z.string().optional().describe("Declaration anchor path (strongly recommended for common symbols; enables precise backend resolution)."),
       includeDeclaration: z.boolean().optional().default(false).describe("Include declaration location when backend supports it."),
       limit: z.number().optional().default(50).describe("Maximum references to return."),
     },
@@ -492,14 +534,14 @@ export function createMcpServer(engine: Engine): McpServer {
 
   server.registerTool("execute", {
     description:
-      "What: Run multiple context-engine queries in one round trip using a TypeScript call plan. " +
-      "Use when: a task needs batched/fan-out lookups or repeatable analysis workflows. " +
+      "What: Batch multiple context-engine tool calls in one round trip using a TypeScript snippet. " +
+      "Use when: a task needs fan-out lookups or repeatable analysis workflows. " +
       "Prefer over: many sequential tool calls. " +
       "Not for: arbitrary host scripting or side effects (no filesystem/network/process access).",
     inputSchema: {
       code: z.string().describe(
-        "TypeScript plan builder. Assign `output` to an array or { calls: [...] } where each call is { tool, args }. " +
-        "Example: output = [{ tool: 'find_files', args: { pattern: '*.ts' } }, { tool: 'find_importers', args: { target: 'src/app.ts' } }]. " +
+        "TypeScript snippet must assign `output` to either an array of calls or { calls: [...] }. " +
+        "Each call is { tool, args }. Example: output = [{ tool: 'find_files', args: { pattern: '*.ts' } }, { tool: 'find_references', args: { symbol: 'Start', filePath: 'src/main.ts' } }]. " +
         "Allowed tools: semantic_search, find_files, get_symbols, get_file_summary, get_recent_changes, get_dependencies, find_importers, find_references, status.",
       ),
       input: z.unknown().optional().describe("Read-only input object available as `input` in sandbox."),

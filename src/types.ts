@@ -154,7 +154,7 @@ export interface MetadataStore {
   getKnownWorktreeIds(): Promise<string[]>;
 
   // Symbol operations
-  getSymbols(query: { name?: string; filePath?: string; kind?: SymbolKind; repoId?: string }): Promise<SymbolInfo[]>;
+  getSymbols(query: { name?: string; filePath?: string; kind?: SymbolKind; repoId?: string; limit?: number }): Promise<SymbolInfo[]>;
   upsertSymbols(symbols: SymbolInfo[]): Promise<void>;
   deleteSymbolsByFile(filePath: string): Promise<void>;
 

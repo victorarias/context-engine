@@ -1,101 +1,233 @@
-# Context Engine MCP
+<p align="center">
+  <h1 align="center">⚡ Context Engine</h1>
+  <p align="center">
+    <strong>Local-first code intelligence for AI agents</strong>
+  </p>
+  <p align="center">
+    An open-source MCP server that indexes your codebase and gives any AI agent semantic search, symbol lookup, dependency analysis, and more — all running on your machine.
+  </p>
+  <p align="center">
+    <a href="#quick-start">Quick Start</a> ·
+    <a href="#connect-to-your-agent">Connect to Your Agent</a> ·
+    <a href="#tools">Tools</a> ·
+    <a href="#configuration">Configuration</a>
+  </p>
+</p>
 
-Local-first MCP server for code indexing and semantic search.
+> [!WARNING]
+> **Work in progress.** Context Engine is under active development. Inspired by [Augment Code](https://www.augmentcode.com/)'s context engine approach, this project aims to bring that level of codebase understanding to any MCP-compatible agent. Expect rough edges, breaking changes, and missing features. Contributions and feedback are very welcome!
 
-## Current Status
+---
 
-- ✅ M1 Walking skeleton (MCP server + tools)
-- ✅ M2 Storage layer (LanceDB + SQLite + WAL + consistency checks)
-- ✅ M3 Text indexing pipeline (scanner + chunker + incremental indexing)
-- ✅ M4 embedding worker runtime complete (priority + backpressure + local/vertex providers)
-- ✅ M5 AST chunking baseline complete (tree-sitter loader + snapshots)
-- ✅ M6 source connector/worktree correctness complete (git worktree + dedup + watcher + git history + docs)
-- ✅ M7 search quality/eval complete (reranker + golden queries + IR metrics + differential checks)
-- ✅ M8 hardening complete (path jail + secret denylist + HTTP transport + QuickJS sandbox + recovery commands)
-- ✅ All planned milestones implemented
+## What is this?
+
+Most AI coding agents are limited to what fits in their context window. They grep, they read files one by one, and they lose track of the big picture. Context Engine fixes that.
+
+It **indexes your entire codebase** — code, symbols, git history, even documentation URLs — into a local vector database, then exposes powerful search and code intelligence tools over the [Model Context Protocol (MCP)](https://modelcontextprotocol.io/). Any MCP-compatible agent (Claude, Cursor, Zed, Pi, etc.) can connect and instantly understand your project.
+
+**Key ideas:**
+
+- 🏠 **Local-first** — Everything runs on your machine. No code leaves your laptop.
+- ⚡ **Incremental** — Only re-indexes what changed. File watcher keeps things fresh automatically.
+- 🧠 **Semantic search** — Find code by *intent*, not just string matching. "how auth tokens are refreshed" → relevant code.
+- 🌳 **AST-aware chunking** — Understands code structure (functions, classes, interfaces) for 6 languages.
+- 🔗 **Code intelligence** — Dependency graphs, reverse imports, symbol references — beyond just search.
+- 🔌 **Universal** — Works with any MCP client. One index, many agents.
 
 ## Quick Start
 
+### Prerequisites
+
+- [Bun](https://bun.sh/) (v1.0+)
+
+### Install & run
+
 ```bash
+git clone https://github.com/victorarias/context-engine.git
+cd context-engine
 bun install
-
-# Index source code (uses context-engine.json if present)
-bun run mcp:index
-
-# Start MCP server (STDIO or HTTP via config)
-bun run mcp
-
-# Check status
-bun run mcp:status
-
-# Validate storage consistency
-bun run mcp:doctor
-
-# Fast MCP preflight (connect + listTools + status + semantic_search)
-bun run mcp:probe
-
-# Full rebuild if needed
-bun run src/cli.ts reindex
 ```
 
-`bun run mcp` (`serve`) now performs an initial index and (by default) starts the worktree-aware watcher.
-Pass a custom config/path with `bun run mcp -- ./path/to/context-engine.json`.
-`get_recent_changes` now returns real git commit/file history for indexed git roots.
-`find_importers` finds reverse dependencies (which files import/re-export a target) via TS semantic graph plus static scan fallback (including Go imports).
-`find_references` finds symbol usages/call-sites (Go via `gopls`, TS/JS via compiler API, heuristic fallback when unresolved).
-`status` now reports TS graph health, TS program-cache hit/miss counters, and p50/p95 latency SLIs for deps/importers/references.
-`execute` runs isolated TypeScript "code mode" snippets that emit scripted MCP tool calls.
-HTTP MCP transport is supported via `server.transport = "http"`.
+Index your project and start the server:
 
-## Config
+```bash
+# Index a codebase
+bun run src/cli.ts index /path/to/your/project
 
-Create `context-engine.json`:
+# Start the MCP server (indexes on startup + watches for changes)
+bun run src/cli.ts serve
+```
+
+That's it. The server is now running on STDIO, ready for an agent to connect.
+
+### Useful commands
+
+```bash
+bun run src/cli.ts serve     # Start MCP server (STDIO or HTTP)
+bun run src/cli.ts index .   # Index current directory
+bun run src/cli.ts status    # Check index status
+bun run src/cli.ts reindex   # Full rebuild
+bun run src/cli.ts doctor    # Validate storage consistency
+```
+
+---
+
+## Connect to Your Agent
+
+Context Engine speaks MCP, so it plugs into any agent that supports MCP servers. Here's how to set it up for the most popular ones:
+
+### Claude Code (Claude CLI)
+
+Add to your `~/.claude/claude_desktop_config.json` (or project-level `.mcp.json`):
+
+```json
+{
+  "mcpServers": {
+    "context-engine": {
+      "command": "bun",
+      "args": ["run", "/absolute/path/to/context-engine/src/cli.ts", "serve"],
+      "cwd": "/path/to/your/project"
+    }
+  }
+}
+```
+
+Or create a `.mcp.json` in your project root:
+
+```json
+{
+  "mcpServers": {
+    "context-engine": {
+      "command": "bun",
+      "args": ["run", "/absolute/path/to/context-engine/src/cli.ts", "serve"]
+    }
+  }
+}
+```
+
+### Cursor
+
+Go to **Settings → MCP Servers → Add Server** and configure:
+
+```json
+{
+  "mcpServers": {
+    "context-engine": {
+      "command": "bun",
+      "args": ["run", "/absolute/path/to/context-engine/src/cli.ts", "serve"]
+    }
+  }
+}
+```
+
+### Zed
+
+Add to your Zed settings (`~/.config/zed/settings.json`):
+
+```json
+{
+  "context_servers": {
+    "context-engine": {
+      "command": {
+        "path": "bun",
+        "args": ["run", "/absolute/path/to/context-engine/src/cli.ts", "serve"]
+      }
+    }
+  }
+}
+```
+
+### HTTP Mode (Any Client)
+
+If your agent supports HTTP-based MCP, you can run Context Engine as an HTTP server:
+
+Create a `context-engine.json` in your project root:
 
 ```json
 {
   "sources": [{ "path": "./src" }],
+  "server": {
+    "transport": "http",
+    "host": "127.0.0.1",
+    "port": 3777
+  }
+}
+```
+
+Then start the server:
+
+```bash
+bun run src/cli.ts serve ./context-engine.json
+```
+
+The MCP endpoint will be available at `http://127.0.0.1:3777`.
+
+### Generic MCP Client
+
+Context Engine works with **any MCP-compatible client**. The server communicates via STDIO by default (or Streamable HTTP). Just point your client at:
+
+```bash
+bun run /path/to/context-engine/src/cli.ts serve
+```
+
+---
+
+## Tools
+
+Once connected, your agent gets access to these tools:
+
+| Tool | What it does |
+|------|-------------|
+| **`semantic_search`** | Natural-language search over your codebase. Find code by intent, not keywords. |
+| **`find_files`** | Find files by glob or substring, scoped to the index. |
+| **`get_symbols`** | Look up function/class/type definitions by name, kind, or file. |
+| **`get_file_summary`** | Quick structural overview of a file (chunks, symbols) without reading it. |
+| **`get_recent_changes`** | Summarize recent git commits and changed files, optionally filtered by topic. |
+| **`get_dependencies`** | Extract import dependencies for a file or directory (TS/JS/Go/Python/Rust/Kotlin). |
+| **`find_importers`** | Reverse dependency lookup — which files import a given target. |
+| **`find_references`** | Find symbol usages/call-sites (Go via gopls, TS/JS via compiler API). |
+| **`execute`** | Batch multiple queries in one round trip via a TypeScript call plan. |
+| **`status`** | Engine health, indexing state, coverage stats, and capability flags. |
+
+---
+
+## Configuration
+
+Create a `context-engine.json` in your project root to customize behavior:
+
+```json
+{
+  "sources": [
+    { "path": "./src" },
+    { "path": "../shared-lib", "include": ["**/*.ts"] }
+  ],
   "embedding": {
     "provider": "local",
     "localBackend": "onnx",
     "model": "Xenova/all-MiniLM-L6-v2",
-    "dimensions": 768,
+    "dimensions": 384,
     "fallbackToMock": true
   },
-  "server": { "transport": "stdio", "host": "127.0.0.1", "port": 3777 },
+  "server": {
+    "transport": "stdio"
+  },
   "watcher": {
     "enabled": true,
-    "debounceMs": 250,
-    "pollIntervalMs": 750
+    "debounceMs": 250
   },
   "gitHistory": {
     "enabled": true,
     "maxCommits": 1000
   },
   "docs": [
-    { "url": "https://example.com/docs/getting-started" }
+    { "url": "https://docs.example.com/api" }
   ]
 }
 ```
 
-Default storage location (when `dataDir` is omitted):
-- `~/.context-engine/<repoId>-<worktreeId>-<path-label>-<hash>/`
-- This avoids writing `.context-engine` folders inside each repo.
-- You can still set `dataDir` explicitly if you want a custom location.
+### Embedding Providers
 
-Supported embedding providers are **only**:
-- `local`
-- `vertex`
-
-Default rollout policy:
-- `embedding.provider = "local"`
-- `embedding.localBackend = "onnx"` (real local embeddings by default)
-- `fallbackToMock = true` keeps startup resilient when ONNX init fails
-
-Local backend modes:
-- `onnx` (real local embeddings via `@huggingface/transformers`, default)
-- `mock` (fast, deterministic fallback/dev mode)
-
-Local ONNX example:
+**Local ONNX (default)** — Runs entirely on your machine using `@huggingface/transformers`. No API keys needed.
 
 ```json
 {
@@ -104,18 +236,12 @@ Local ONNX example:
     "localBackend": "onnx",
     "model": "Xenova/all-MiniLM-L6-v2",
     "dimensions": 384,
-    "cacheDir": "./.context-engine/models",
     "fallbackToMock": true
   }
 }
 ```
 
-Notes for ONNX mode:
-- Uses `@huggingface/transformers` in the worker thread.
-- If optional native dependencies are blocked by Bun, run `bun pm untrusted` and approve required installs.
-- With `fallbackToMock: true`, startup will fall back to mock embeddings if ONNX init fails.
-
-Vertex example:
+**Vertex AI** — Use Google Cloud embeddings for higher quality at the cost of network calls.
 
 ```json
 {
@@ -124,95 +250,112 @@ Vertex example:
     "projectId": "my-gcp-project",
     "location": "us-central1",
     "model": "text-embedding-005",
-    "dimensions": 768,
-    "requestTimeoutMs": 30000,
-    "maxRetries": 2,
-    "retryBaseDelayMs": 250
+    "dimensions": 768
   }
 }
 ```
 
-Vertex auth:
-- Set `VERTEX_ACCESS_TOKEN`, or
-- Set `GOOGLE_APPLICATION_CREDENTIALS` to a service-account key JSON (provider exchanges JWT for OAuth token), or
-- Run `gcloud auth application-default login` and the provider will use ADC token via gcloud.
+Vertex auth: set `VERTEX_ACCESS_TOKEN`, or `GOOGLE_APPLICATION_CREDENTIALS`, or use `gcloud auth application-default login`.
 
-## Test
+### Storage
+
+By default, index data lives in `~/.context-engine/<repo-hash>/` — no `.context-engine` folder cluttering your repo. You can override this with `"dataDir": "./my-index"` in the config.
+
+### Supported Languages (AST Chunking)
+
+Context Engine uses tree-sitter for structure-aware code chunking:
+
+- TypeScript / JavaScript
+- Python
+- Go
+- Rust
+- Kotlin
+
+Other file types fall back to a sliding-window text chunker.
+
+---
+
+## Architecture
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    MCP Clients                               │
+│  Claude  ·  Cursor  ·  Zed  ·  Pi  ·  Any MCP Agent        │
+└──────────┬──────────────────────────────────────┬────────────┘
+           │ STDIO                                │ HTTP
+┌──────────▼──────────────────────────────────────▼────────────┐
+│                   MCP Transport Layer                         │
+├──────────────────────────────────────────────────────────────┤
+│                    Security Layer                             │
+│        Path jail · Secret exclusion · Input validation        │
+├──────────────────────────────────────────────────────────────┤
+│                      Tool Router                              │
+│  semantic_search · find_files · get_symbols · get_dependencies│
+│  find_importers · find_references · execute · status · ...    │
+├──────────────────────────────────────────────────────────────┤
+│                     Query Engine                              │
+│        Query → Vector Search (LanceDB) → Reranker             │
+├──────────────────────────────────────────────────────────────┤
+│                   Indexing Pipeline                           │
+│    Source Scanner → AST/Text Chunker → Embedding Worker →     │
+│    Storage (LanceDB vectors + SQLite metadata)                │
+├──────────────────────────────────────────────────────────────┤
+│               Source Connectors & Watcher                     │
+│    Local FS · Git Repos · Git History · Doc URLs              │
+└──────────────────────────────────────────────────────────────┘
+```
+
+See [`ARCHITECTURE.md`](./ARCHITECTURE.md) for the full design document.
+
+---
+
+## Development
 
 ```bash
+# Run all tests
 bun test
+
+# Individual test suites
 bun run test:unit
 bun run test:integration
 bun run test:e2e
-bun run test:quality
-```
+bun run test:quality        # eval + benchmarks + contract + regression
 
-Embedding model bakeoff (A/B compare on your repo + labeled queries):
+# MCP preflight check (useful before connecting agents)
+bun run src/dev/mcp-probe.ts
 
-```bash
-cp eval/exsin-queries.example.json eval/exsin-queries.json
-cp eval/embedding-candidates.example.json eval/embedding-candidates.json
-# edit projectId/model candidates as needed
-
-bun run eval:embeddings -- \
-  --repo ~/projects/exsin \
+# Embedding model comparison
+bun run src/dev/embedding-bakeoff.ts -- \
+  --repo ~/projects/myapp \
   --queries eval/exsin-queries.json \
-  --candidates eval/embedding-candidates.json \
-  --data-root ./.context-engine/bakeoff \
-  --limit 10 \
-  --out eval/embedding-bakeoff-report.json
+  --candidates eval/embedding-candidates.json
 ```
 
-All test scripts run with engine debug logging enabled and write JSONL logs to:
+### Environment Variables
 
-- `.context-engine/test-logs/unit.log`
-- `.context-engine/test-logs/integration-core.log`
-- `.context-engine/test-logs/integration-storage.log`
-- `.context-engine/test-logs/e2e.log`
-- `.context-engine/test-logs/eval.log`
-- `.context-engine/test-logs/bench.log`
-- `.context-engine/test-logs/contract.log`
-- `.context-engine/test-logs/regression.log`
+| Variable | Description |
+|----------|------------|
+| `CE_LOG_LEVEL` | `debug` / `info` / `warn` / `error` |
+| `CE_LOG_FILE` | Path to JSONL log file |
+| `CE_LOG_STDERR` | Set to `0` to disable stderr logging |
 
-Runtime logging controls:
+---
 
-- `CE_LOG_LEVEL=debug|info|warn|error`
-- `CE_LOG_FILE=/path/to/log.jsonl`
-- `CE_LOG_STDERR=0` to disable stderr log output
+## Roadmap
 
-MCP stuck-debug workflow (recommended before external-agent runs):
+This is a work in progress. Some things on the radar:
 
-```bash
-# quick, bounded probe with timing per step + engine log tail on failure
-bun run mcp:probe
+- [ ] npm package for easier installation (`npx context-engine serve`)
+- [ ] More languages for AST chunking (Java, C#, Ruby, ...)
+- [ ] Smarter reranking (cross-encoder, LLM-based)
+- [ ] Multi-repo support
+- [ ] Project-level summaries and architecture maps
+- [ ] Pre-built binaries (no Bun dependency)
 
-# probe with your real config
-bun run mcp:probe -- --config ./context-engine.json --step-timeout-ms 8000
-```
+Have ideas? Open an issue!
 
-## Key Files
-
-- `src/engine/context-engine.ts` — indexing/search orchestration
-- `src/engine/reranker.ts` — score fusion reranker
-- `src/engine/watcher.ts` — worktree-aware polling watcher + debounce
-- `src/storage/vector-store.ts` — LanceDB wrapper
-- `src/storage/metadata-store.ts` — SQLite metadata wrapper
-- `src/storage/write-log.ts` — dual-write WAL
-- `src/storage/security.ts` — path jail + secret denylist helpers
-- `src/chunker/text-chunker.ts` — sliding window chunker
-- `src/chunker/ast-chunker.ts` — AST-aware symbol chunking (TS/JS/Python/Go/Rust/Kotlin)
-- `src/chunker/tree-sitter-loader.ts` — tree-sitter WASM grammar loader
-- `src/chunker/chunker.ts` — hybrid AST/text chunker router
-- `src/sources/local-fs.ts` — local filesystem scanner
-- `src/sources/git-worktree.ts` — git worktree detection + HEAD manifest parsing
-- `src/sources/git-history.ts` — git log connector used by `get_recent_changes`
-- `src/sources/doc-fetcher.ts` — docs fetch + extraction used by docs indexing pipeline
-- `src/server/transports.ts` — STDIO + Streamable HTTP transports
-- `src/server/tools/code-sandbox.ts` — isolated TypeScript sandbox runner
-- `src/engine/ts-dependency-service.ts` — TS compiler-aware dependency graph (forward + reverse edges)
-
-See `ARCHITECTURE.md` and `IMPLEMENTATION_PLAN.md` for detailed design + milestone tracking.
+---
 
 ## License
 
-GNU General Public License v3.0 only (`GPL-3.0`). See `LICENSE`.
+[GPL-3.0](./LICENSE)

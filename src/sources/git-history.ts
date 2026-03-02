@@ -17,6 +17,7 @@ export interface GitHistoryEntry {
 export interface GitHistoryQueryOptions {
   maxCommits?: number;
   query?: string;
+  since?: string;
 }
 
 export function getRecentGitChanges(root: string, options: GitHistoryQueryOptions = {}): GitHistoryEntry[] {
@@ -24,13 +25,20 @@ export function getRecentGitChanges(root: string, options: GitHistoryQueryOption
 
   const maxCommits = Math.max(1, options.maxCommits ?? 100);
 
-  const raw = runGit(root, [
+  const args = [
     "log",
     `--max-count=${maxCommits}`,
     "--date=iso-strict",
     "--pretty=format:%x1e%H%x1f%an%x1f%ad%x1f%s",
     "--name-only",
-  ]);
+  ];
+
+  const since = options.since?.trim();
+  if (since) {
+    args.splice(2, 0, `--since=${since}`);
+  }
+
+  const raw = runGit(root, args);
 
   if (!raw.trim()) return [];
 

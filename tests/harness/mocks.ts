@@ -205,14 +205,16 @@ export class MockMetadataStore implements MetadataStore {
   }
 
   // Symbols
-  async getSymbols(query: { name?: string; filePath?: string; kind?: SymbolKind; repoId?: string }) {
-    return this.symbols.filter((s) => {
+  async getSymbols(query: { name?: string; filePath?: string; kind?: SymbolKind; repoId?: string; limit?: number }) {
+    const filtered = this.symbols.filter((s) => {
       if (query.name && !s.name.toLowerCase().includes(query.name.toLowerCase())) return false;
       if (query.filePath && s.filePath !== query.filePath) return false;
       if (query.kind && s.kind !== query.kind) return false;
       if (query.repoId && s.repoId !== query.repoId) return false;
       return true;
     });
+
+    return filtered.slice(0, Math.max(1, Math.floor(query.limit ?? 200)));
   }
   async upsertSymbols(symbols: SymbolInfo[]) {
     for (const sym of symbols) {

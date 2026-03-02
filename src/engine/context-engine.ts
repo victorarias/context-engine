@@ -106,7 +106,7 @@ export class ContextEngine implements Engine {
     return engine;
   }
 
-  async search(query: string, options?: { worktreeId?: string; limit?: number }): Promise<SearchResult[]> {
+  async search(query: string, options?: { worktreeId?: string; limit?: number; minScore?: number }): Promise<SearchResult[]> {
     if (!query.trim()) return [];
 
     const startedAt = Date.now();
@@ -115,6 +115,7 @@ export class ContextEngine implements Engine {
       query,
       worktreeId,
       limit: options?.limit ?? 10,
+      minScore: options?.minScore,
     });
     const [queryVector] = await this.embedder.embedWithPriority([query], 0);
     const limit = Math.max(1, options?.limit ?? 10);
@@ -169,6 +170,10 @@ export class ContextEngine implements Engine {
       candidates.push({ path: resolvedPath, result });
     }
 
+    const minScore = Number.isFinite(options?.minScore)
+      ? Math.max(0, Math.min(10, Number(options?.minScore)))
+      : undefined;
+
     const reranked = rerankCandidates(
       query,
       candidates.map((candidate) => ({
@@ -177,11 +182,16 @@ export class ContextEngine implements Engine {
         baseScore: candidate.result.score,
       })),
       { roots: this.indexedRoots },
-    ).slice(0, limit);
+    );
+
+    const filtered = minScore === undefined
+      ? reranked
+      : reranked.filter((candidate) => candidate.score >= minScore);
 
     const byChunkId = new Map(candidates.map((candidate) => [candidate.result.chunkId, candidate.result]));
 
-    const results = reranked
+    const results = filtered
+      .slice(0, limit)
       .map((candidate) => {
         const result = byChunkId.get(candidate.chunk.id);
         if (!result) return null;
@@ -205,6 +215,7 @@ export class ContextEngine implements Engine {
       query,
       worktreeId,
       vectorCandidates: vectorResults.length,
+      minScore,
       returned: results.length,
       durationMs: Date.now() - startedAt,
     });
@@ -232,12 +243,13 @@ export class ContextEngine implements Engine {
     return files.filter((file) => matchesPattern(file, pattern));
   }
 
-  async getSymbols(query: { name?: string; filePath?: string; kind?: string }): Promise<SymbolInfo[]> {
+  async getSymbols(query: { name?: string; filePath?: string; kind?: string; limit?: number }): Promise<SymbolInfo[]> {
     return this.metadataStore.getSymbols({
       name: query.name,
       filePath: query.filePath,
       kind: query.kind as SymbolInfo["kind"] | undefined,
       repoId: this.repoId,
+      limit: query.limit,
     });
   }
 
@@ -264,11 +276,23 @@ export class ContextEngine implements Engine {
       return `File not indexed: ${filePath}`;
     }
 
-    const symbols = await this.metadataStore.getSymbols({ filePath: (entry?.path ?? dirtyEntry!.path), repoId: this.repoId });
+    const summaryPath = entry?.path ?? dirtyEntry!.path;
+    const symbols = await this.metadataStore.getSymbols({ filePath: summaryPath, repoId: this.repoId });
     const blob = entry ? await this.metadataStore.getBlob(entry.blobHash) : null;
 
+    const resolved = this.resolveFileOnDisk(summaryPath);
+    let lineCount = 0;
+    if (resolved && existsSync(resolved)) {
+      try {
+        lineCount = readFileSync(resolved, "utf-8").split(/\r?\n/).length;
+      } catch {
+        lineCount = 0;
+      }
+    }
+
     const lines: string[] = [
-      `File: ${entry?.path ?? dirtyEntry!.path}`,
+      `File: ${summaryPath}`,
+      `Lines: ${lineCount > 0 ? lineCount : "unknown"}`,
       `Chunks: ${blob?.chunkIds.length ?? dirtyEntry?.chunkIds.length ?? 0}`,
       `Symbols: ${symbols.length}`,
     ];
@@ -283,10 +307,17 @@ export class ContextEngine implements Engine {
     return lines.join("\n");
   }
 
-  async getRecentChanges(query?: string): Promise<string> {
+  async getRecentChanges(options?: string | { query?: string; limit?: number; since?: string }): Promise<string> {
     if (!this.config.gitHistory.enabled) {
       return "Git history connector is disabled in config (gitHistory.enabled=false).";
     }
+
+    const query = typeof options === "string" ? options : options?.query;
+    const since = typeof options === "string" ? undefined : options?.since?.trim();
+    const requestedLimit = typeof options === "string" ? undefined : options?.limit;
+    const limit = Number.isFinite(requestedLimit)
+      ? Math.max(1, Math.min(200, Math.floor(requestedLimit!)))
+      : 20;
 
     const roots = this.indexedRoots.length > 0
       ? this.indexedRoots.map((root) => resolve(root))
@@ -308,23 +339,39 @@ export class ContextEngine implements Engine {
     }
 
     const maxCommitsPerRepo = Math.max(1, this.config.gitHistory.maxCommits);
+    const perRepoBudget = Math.max(limit, Math.min(maxCommitsPerRepo, limit * 4));
     const allEntries = Array.from(uniqueRootsByRepo.values())
-      .flatMap((root) => getRecentGitChanges(root, { maxCommits: maxCommitsPerRepo, query }));
+      .flatMap((root) => getRecentGitChanges(root, {
+        maxCommits: perRepoBudget,
+        query,
+        since,
+      }));
 
     const entries = allEntries
       .sort((a, b) => b.date.localeCompare(a.date))
-      .slice(0, Math.min(50, maxCommitsPerRepo));
+      .slice(0, limit);
 
     if (entries.length === 0) {
-      return query?.trim()
-        ? `No recent changes matched query: ${query}`
-        : "No recent changes found.";
+      if (query?.trim() && since) {
+        return `No recent changes matched query: ${query} (since ${since}).`;
+      }
+
+      if (query?.trim()) {
+        return `No recent changes matched query: ${query}`;
+      }
+
+      if (since) {
+        return `No recent changes found since ${since}.`;
+      }
+
+      return "No recent changes found.";
     }
 
     const lines: string[] = [
       query?.trim()
-        ? `Recent changes matching "${query}":`
+        ? `Recent changes matching "${query}"${since ? ` since ${since}` : ""}:`
         : "Recent changes:",
+      `Filters: limit=${limit}${since ? `, since=${since}` : ""}`,
     ];
 
     for (const entry of entries) {
@@ -774,11 +821,16 @@ export class ContextEngine implements Engine {
       });
 
       if (tsResult.resolution.kind === "ambiguous") {
+        const fallback = await this.findReferencesHeuristic(query, {
+          filePath: normalizedFilePath,
+          limit,
+        });
+
         return this.formatFindReferencesResponse({
           symbol: query,
           requestedBackend: "tsserver",
-          actualBackend: "none",
-          references: [],
+          actualBackend: "heuristic",
+          references: fallback,
           fallbackReason: tsResult.resolution.reason,
           candidates: tsResult.resolution.candidates,
           guidance: "Provide `filePath` + exact exported symbol name to run TypeScript references precisely.",
@@ -796,22 +848,32 @@ export class ContextEngine implements Engine {
       }
 
       if (tsResult.resolution.kind === "resolved" && tsResult.references.length === 0) {
+        const fallback = await this.findReferencesHeuristic(query, {
+          filePath: normalizedFilePath,
+          limit,
+        });
+
         return this.formatFindReferencesResponse({
           symbol: query,
           requestedBackend: "tsserver",
-          actualBackend: "none",
-          references: [],
+          actualBackend: "heuristic",
+          references: fallback,
           fallbackReason: `TypeScript backend returned 0 references for ${tsResult.resolution.declaration.filePath}:${tsResult.resolution.declaration.line}`,
           candidates: tsResult.resolution.candidates,
           guidance: "Try includeDeclaration=true or specify a different anchor filePath if symbol shadowing is involved.",
         });
       }
 
+      const fallback = await this.findReferencesHeuristic(query, {
+        filePath: normalizedFilePath,
+        limit,
+      });
+
       return this.formatFindReferencesResponse({
         symbol: query,
         requestedBackend: "tsserver",
-        actualBackend: "none",
-        references: [],
+        actualBackend: "heuristic",
+        references: fallback,
         fallbackReason: tsResult.resolution.reason,
         candidates: tsResult.resolution.candidates,
       });
@@ -823,12 +885,17 @@ export class ContextEngine implements Engine {
 
     if (shouldTryGo) {
       if (goResolution.kind === "ambiguous") {
+        const fallback = await this.findReferencesHeuristic(query, {
+          filePath: normalizedFilePath,
+          limit,
+        });
+
         return this.formatFindReferencesResponse({
           symbol: query,
           requestedBackend: "gopls",
-          actualBackend: "none",
+          actualBackend: "heuristic",
           fallbackReason: goResolution.reason,
-          references: [],
+          references: fallback,
           candidates: goResolution.candidates,
           guidance: "Provide `filePath` to the exact Go declaration to run gopls references precisely.",
         });
@@ -903,11 +970,16 @@ export class ContextEngine implements Engine {
     });
 
     if (tsResult.resolution.kind === "ambiguous") {
+      const fallback = await this.findReferencesHeuristic(query, {
+        filePath: normalizedFilePath,
+        limit,
+      });
+
       return this.formatFindReferencesResponse({
         symbol: query,
         requestedBackend: "tsserver",
-        actualBackend: "none",
-        references: [],
+        actualBackend: "heuristic",
+        references: fallback,
         fallbackReason: tsResult.resolution.reason,
         candidates: tsResult.resolution.candidates,
         guidance: "Provide `filePath` to the exact TypeScript declaration to disambiguate.",
