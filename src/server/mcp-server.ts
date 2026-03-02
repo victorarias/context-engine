@@ -204,6 +204,18 @@ function formatStatus(status: Awaited<ReturnType<Engine["status"]>>): string {
     lines.push(
       `TS graph: ${status.tsDependencyGraph.filesIndexed} files, ${status.tsDependencyGraph.edgesResolved}/${status.tsDependencyGraph.edgesTotal} edges resolved (${(status.tsDependencyGraph.resolutionSuccessRate * 100).toFixed(1)}%)`,
     );
+    lines.push(
+      `TS program cache: ${status.tsDependencyGraph.programCacheHits} hits / ${status.tsDependencyGraph.programCacheMisses} misses (${status.tsDependencyGraph.cachedPrograms} cached programs)`,
+    );
+  }
+
+  if (status.queryLatencyMs) {
+    const formatLatency = (entry: { count: number; p50: number; p95: number }) =>
+      entry.count > 0 ? `${entry.p50}/${entry.p95}` : "n/a";
+
+    lines.push(
+      `Latency (ms): deps p50/p95=${formatLatency(status.queryLatencyMs.getDependencies)}, importers p50/p95=${formatLatency(status.queryLatencyMs.findImporters)}, refs p50/p95=${formatLatency(status.queryLatencyMs.findReferences)}`,
+    );
   }
 
   return lines.join("\n");

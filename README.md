@@ -43,6 +43,7 @@ Pass a custom config/path with `bun run mcp -- ./path/to/context-engine.json`.
 `get_recent_changes` now returns real git commit/file history for indexed git roots.
 `find_importers` finds reverse dependencies (which files import/re-export a target) via TS semantic graph plus static scan fallback (including Go imports).
 `find_references` finds symbol usages/call-sites (Go via `gopls`, TS/JS via compiler API, heuristic fallback when unresolved).
+`status` now reports TS graph health, TS program-cache hit/miss counters, and p50/p95 latency SLIs for deps/importers/references.
 `execute` runs isolated TypeScript "code mode" snippets that emit scripted MCP tool calls.
 HTTP MCP transport is supported via `server.transport = "http"`.
 
@@ -161,7 +162,8 @@ bun run eval:embeddings -- \
 All test scripts run with engine debug logging enabled and write JSONL logs to:
 
 - `.context-engine/test-logs/unit.log`
-- `.context-engine/test-logs/integration.log`
+- `.context-engine/test-logs/integration-core.log`
+- `.context-engine/test-logs/integration-storage.log`
 - `.context-engine/test-logs/e2e.log`
 - `.context-engine/test-logs/eval.log`
 - `.context-engine/test-logs/bench.log`

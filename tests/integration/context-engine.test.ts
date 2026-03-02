@@ -177,6 +177,96 @@ export function remoteCall() {
     await engine.close();
   });
 
+  it("resolves tsconfig extends/paths/project-references dependencies", async () => {
+    const tmp = TempDir.create("ce-engine-tsconfig-fixtures");
+    dirs.push(tmp);
+
+    const repoDir = join(tmp.path, "repo");
+    mkdirSync(join(repoDir, "shared"), { recursive: true });
+    mkdirSync(join(repoDir, "packages", "lib", "src"), { recursive: true });
+    mkdirSync(join(repoDir, "packages", "app", "src"), { recursive: true });
+
+    writeFileSync(
+      join(repoDir, "tsconfig.base.json"),
+      JSON.stringify({
+        compilerOptions: {
+          target: "ES2022",
+          module: "ESNext",
+          moduleResolution: "Bundler",
+          baseUrl: ".",
+          paths: {
+            "@shared/*": ["shared/*"],
+            "@lib/*": ["packages/lib/src/*"],
+          },
+        },
+      }, null, 2),
+    );
+
+    writeFileSync(
+      join(repoDir, "packages", "lib", "tsconfig.json"),
+      JSON.stringify({
+        extends: "../../tsconfig.base.json",
+        compilerOptions: {
+          composite: true,
+          rootDir: "src",
+          outDir: "dist",
+        },
+        include: ["src/**/*"],
+      }, null, 2),
+    );
+
+    writeFileSync(
+      join(repoDir, "packages", "app", "tsconfig.json"),
+      JSON.stringify({
+        extends: "../../tsconfig.base.json",
+        references: [{ path: "../lib" }],
+        compilerOptions: {
+          rootDir: "src",
+          outDir: "dist",
+        },
+        include: ["src/**/*"],
+      }, null, 2),
+    );
+
+    writeFileSync(join(repoDir, "shared", "math.ts"), "export const plus = (a: number, b: number) => a + b;\n");
+    writeFileSync(
+      join(repoDir, "packages", "lib", "src", "add.ts"),
+      "import { plus } from '@shared/math';\nexport const add = plus;\n",
+    );
+    writeFileSync(
+      join(repoDir, "packages", "app", "src", "run.ts"),
+      "import { add } from '@lib/add';\nexport const run = () => add(1, 2);\n",
+    );
+    writeFileSync(
+      join(repoDir, "packages", "app", "src", "broken.ts"),
+      "import { missing } from './missing';\nexport const nope = missing;\n",
+    );
+
+    const config = ConfigSchema.parse({
+      sources: [{ path: repoDir }],
+      dataDir: join(tmp.path, "data"),
+      embedding: {
+        provider: "local",
+        localBackend: "mock",
+        dimensions: 768,
+      },
+    });
+
+    const engine = await ContextEngine.create(config);
+    await engine.index();
+
+    const appDeps = await engine.getDependencies("packages/app/src/run.ts");
+    expect(appDeps).toContain("packages/lib/src/add.ts");
+
+    const libDeps = await engine.getDependencies("packages/lib/src/add.ts");
+    expect(libDeps).toContain("shared/math.ts");
+
+    const brokenDeps = await engine.getDependencies("packages/app/src/broken.ts");
+    expect(brokenDeps).toContain("unresolved: module could not be resolved");
+
+    await engine.close();
+  });
+
   it("parses Go dependencies and reference queries", async () => {
     const tmp = TempDir.create("ce-engine-go");
     dirs.push(tmp);

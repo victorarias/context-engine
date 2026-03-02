@@ -179,6 +179,18 @@ async function status() {
     console.log(
       `TS graph: ${s.tsDependencyGraph.filesIndexed} files, ${s.tsDependencyGraph.edgesResolved}/${s.tsDependencyGraph.edgesTotal} edges resolved (${(s.tsDependencyGraph.resolutionSuccessRate * 100).toFixed(1)}%)`,
     );
+    console.log(
+      `TS program cache: ${s.tsDependencyGraph.programCacheHits} hits / ${s.tsDependencyGraph.programCacheMisses} misses (${s.tsDependencyGraph.cachedPrograms} cached programs)`,
+    );
+  }
+
+  if (s.queryLatencyMs) {
+    const formatLatency = (entry: { count: number; p50: number; p95: number }) =>
+      entry.count > 0 ? `${entry.p50}/${entry.p95}` : "n/a";
+
+    console.log(
+      `Latency (ms): deps p50/p95=${formatLatency(s.queryLatencyMs.getDependencies)}, importers p50/p95=${formatLatency(s.queryLatencyMs.findImporters)}, refs p50/p95=${formatLatency(s.queryLatencyMs.findReferences)}`,
+    );
   }
 
   await engine.close();

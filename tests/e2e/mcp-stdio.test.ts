@@ -192,6 +192,8 @@ describe("MCP Server E2E", () => {
     const text = (result.content[0] as { type: "text"; text: string }).text;
     expect(text).toContain("Indexing: idle");
     expect(text).toContain("Embedding model");
+    expect(text).toContain("TS graph:");
+    expect(text).toContain("Latency (ms):");
   });
 
   it("execute runs scripted MCP tool calls", async () => {

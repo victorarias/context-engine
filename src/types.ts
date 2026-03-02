@@ -214,5 +214,13 @@ export interface EngineStatus {
     edgesUnresolved: number;
     resolutionSuccessRate: number;
     lastBuiltAt: number;
+    programCacheHits: number;
+    programCacheMisses: number;
+    cachedPrograms: number;
+  };
+  queryLatencyMs?: {
+    getDependencies: { count: number; p50: number; p95: number };
+    findImporters: { count: number; p50: number; p95: number };
+    findReferences: { count: number; p50: number; p95: number };
   };
 }

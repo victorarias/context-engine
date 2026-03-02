@@ -78,6 +78,8 @@ const TS_EXTENSIONS = new Set([".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".m
 
 export class TsDependencyService {
   private roots: string[];
+  private visibleTsFiles = new Set<string>();
+
   private depsByFile = new Map<string, TsDependencyEdge[]>();
   private importersByTarget = new Map<string, Set<string>>();
   private importersBySpecifier = new Map<string, Set<string>>();
@@ -89,6 +91,11 @@ export class TsDependencyService {
   private relativeByAbsolute = new Map<string, string>();
   private projectByFile = new Map<string, string>();
   private projectIndex = new Map<string, ProjectIndex>();
+
+  private projectVersions = new Map<string, number>();
+  private projectProgramCache = new Map<string, { version: number; program: ts.Program }>();
+  private programCacheHits = 0;
+  private programCacheMisses = 0;
 
   private stats: TsDependencyStats = {
     filesIndexed: 0,
@@ -108,116 +115,85 @@ export class TsDependencyService {
   }
 
   rebuild(visibleFiles: string[]): void {
-    this.depsByFile.clear();
-    this.importersByTarget.clear();
-    this.importersBySpecifier.clear();
-    this.configCacheByDir.clear();
-
-    this.declarationsBySymbol.clear();
-    this.declarationsByFile.clear();
-    this.absoluteByRelative.clear();
-    this.relativeByAbsolute.clear();
-    this.projectByFile.clear();
-    this.projectIndex.clear();
-
-    let edgesTotal = 0;
-    let edgesResolved = 0;
-    let edgesUnresolved = 0;
+    this.clearAll();
 
     const tsFiles = visibleFiles
       .map(normalizePath)
       .filter((path) => TS_EXTENSIONS.has(extname(path).toLowerCase()));
 
+    this.visibleTsFiles = new Set(tsFiles);
+
     for (const relativePath of tsFiles) {
-      const absolutePath = this.resolveInRoots(relativePath);
-      if (!absolutePath || !existsSync(absolutePath)) continue;
+      this.upsertFileAnalysis(relativePath);
+    }
 
-      let content: string;
-      try {
-        content = readFileSync(absolutePath, "utf-8");
-      } catch {
-        continue;
-      }
+    this.recomputeStats();
+  }
 
-      const absoluteNormalized = normalizePath(resolve(absolutePath));
-      this.absoluteByRelative.set(relativePath, absoluteNormalized);
-      this.relativeByAbsolute.set(absoluteNormalized, relativePath);
+  applyDelta(params: {
+    visibleFiles: string[];
+    changedPaths: string[];
+    removedPaths: string[];
+    forceRebuild?: boolean;
+  }): void {
+    if (params.forceRebuild || this.stats.lastBuiltAt === 0) {
+      this.rebuild(params.visibleFiles);
+      return;
+    }
 
-      const project = this.getOwningProject(absolutePath);
-      this.projectByFile.set(relativePath, project.id);
+    const visibleTs = new Set(
+      params.visibleFiles
+        .map(normalizePath)
+        .filter((path) => TS_EXTENSIONS.has(extname(path).toLowerCase())),
+    );
 
-      const projectBucket = this.projectIndex.get(project.id) ?? {
-        id: project.id,
-        configPath: project.configPath,
-        compilerOptions: project.compilerOptions,
-        files: new Set<string>(),
-      };
-      projectBucket.files.add(absoluteNormalized);
-      this.projectIndex.set(project.id, projectBucket);
+    this.visibleTsFiles = visibleTs;
 
-      const facts = extractFileFacts(content, absolutePath);
-      const edges: TsDependencyEdge[] = facts.edges.map((edge) => {
-        const resolved = this.resolveSpecifier(edge.rawSpecifier, absolutePath, project);
-
-        return {
-          sourceFile: relativePath,
-          rawSpecifier: edge.rawSpecifier,
-          edgeKind: edge.edgeKind,
-          projectId: project.id,
-          confidence: resolved.confidence,
-          resolvedTarget: resolved.target,
-          unresolvedReason: resolved.reason,
-        };
-      });
-
-      const declarations: TsSymbolDeclaration[] = facts.declarations.map((decl) => ({
-        name: decl.name,
-        kind: decl.kind,
-        filePath: relativePath,
-        absolutePath: absoluteNormalized,
-        position: decl.position,
-        line: decl.line,
-        projectId: project.id,
-      }));
-
-      this.declarationsByFile.set(relativePath, declarations);
-      for (const decl of declarations) {
-        const bucket = this.declarationsBySymbol.get(decl.name) ?? [];
-        bucket.push(decl);
-        this.declarationsBySymbol.set(decl.name, bucket);
-      }
-
-      this.depsByFile.set(relativePath, edges);
-
-      for (const edge of edges) {
-        edgesTotal++;
-        if (edge.resolvedTarget) edgesResolved++;
-        else edgesUnresolved++;
-
-        const specSet = this.importersBySpecifier.get(edge.rawSpecifier) ?? new Set<string>();
-        specSet.add(relativePath);
-        this.importersBySpecifier.set(edge.rawSpecifier, specSet);
-
-        if (edge.resolvedTarget) {
-          const importerSet = this.importersByTarget.get(edge.resolvedTarget) ?? new Set<string>();
-          importerSet.add(relativePath);
-          this.importersByTarget.set(edge.resolvedTarget, importerSet);
-        }
+    const removeCandidates = new Set<string>();
+    for (const path of params.removedPaths) {
+      const normalized = normalizePath(path);
+      if (TS_EXTENSIONS.has(extname(normalized).toLowerCase())) {
+        removeCandidates.add(normalized);
       }
     }
 
-    this.stats = {
-      filesIndexed: this.depsByFile.size,
-      edgesTotal,
-      edgesResolved,
-      edgesUnresolved,
-      resolutionSuccessRate: edgesTotal > 0 ? edgesResolved / edgesTotal : 0,
-      lastBuiltAt: Date.now(),
-    };
+    for (const path of params.changedPaths) {
+      const normalized = normalizePath(path);
+      if (!visibleTs.has(normalized) || !TS_EXTENSIONS.has(extname(normalized).toLowerCase())) {
+        removeCandidates.add(normalized);
+      }
+    }
+
+    for (const existing of Array.from(this.depsByFile.keys())) {
+      if (!visibleTs.has(existing)) {
+        removeCandidates.add(existing);
+      }
+    }
+
+    for (const filePath of removeCandidates) {
+      this.removeFileAnalysis(filePath);
+    }
+
+    for (const path of params.changedPaths) {
+      const normalized = normalizePath(path);
+      if (visibleTs.has(normalized)) {
+        this.upsertFileAnalysis(normalized);
+      }
+    }
+
+    this.recomputeStats();
   }
 
   getStats(): TsDependencyStats {
     return { ...this.stats };
+  }
+
+  getProgramCacheStats(): { hits: number; misses: number; size: number } {
+    return {
+      hits: this.programCacheHits,
+      misses: this.programCacheMisses,
+      size: this.projectProgramCache.size,
+    };
   }
 
   getFileEdges(filePath: string): TsDependencyEdge[] {
@@ -302,6 +278,205 @@ export class TsDependencyService {
     };
   }
 
+  private clearAll(): void {
+    this.visibleTsFiles.clear();
+    this.depsByFile.clear();
+    this.importersByTarget.clear();
+    this.importersBySpecifier.clear();
+    this.configCacheByDir.clear();
+
+    this.declarationsBySymbol.clear();
+    this.declarationsByFile.clear();
+    this.absoluteByRelative.clear();
+    this.relativeByAbsolute.clear();
+    this.projectByFile.clear();
+    this.projectIndex.clear();
+
+    this.projectVersions.clear();
+    this.projectProgramCache.clear();
+  }
+
+  private recomputeStats(): void {
+    let edgesTotal = 0;
+    let edgesResolved = 0;
+    let edgesUnresolved = 0;
+
+    for (const edges of this.depsByFile.values()) {
+      for (const edge of edges) {
+        edgesTotal += 1;
+        if (edge.resolvedTarget) edgesResolved += 1;
+        else edgesUnresolved += 1;
+      }
+    }
+
+    this.stats = {
+      filesIndexed: this.depsByFile.size,
+      edgesTotal,
+      edgesResolved,
+      edgesUnresolved,
+      resolutionSuccessRate: edgesTotal > 0 ? edgesResolved / edgesTotal : 0,
+      lastBuiltAt: Date.now(),
+    };
+  }
+
+  private upsertFileAnalysis(relativePath: string): void {
+    const normalized = normalizePath(relativePath);
+
+    if (!TS_EXTENSIONS.has(extname(normalized).toLowerCase())) {
+      this.removeFileAnalysis(normalized);
+      return;
+    }
+
+    const absolutePath = this.resolveInRoots(normalized);
+    if (!absolutePath || !existsSync(absolutePath)) {
+      this.removeFileAnalysis(normalized);
+      return;
+    }
+
+    let content: string;
+    try {
+      content = readFileSync(absolutePath, "utf-8");
+    } catch {
+      this.removeFileAnalysis(normalized);
+      return;
+    }
+
+    this.removeFileAnalysis(normalized);
+
+    const absoluteNormalized = normalizePath(resolve(absolutePath));
+    this.absoluteByRelative.set(normalized, absoluteNormalized);
+    this.relativeByAbsolute.set(absoluteNormalized, normalized);
+
+    const project = this.getOwningProject(absolutePath);
+    this.projectByFile.set(normalized, project.id);
+
+    const projectBucket = this.projectIndex.get(project.id) ?? {
+      id: project.id,
+      configPath: project.configPath,
+      compilerOptions: project.compilerOptions,
+      files: new Set<string>(),
+    };
+    projectBucket.files.add(absoluteNormalized);
+    this.projectIndex.set(project.id, projectBucket);
+
+    const facts = extractFileFacts(content, absolutePath);
+
+    const edges: TsDependencyEdge[] = facts.edges.map((edge) => {
+      const resolved = this.resolveSpecifier(edge.rawSpecifier, absolutePath, project);
+
+      return {
+        sourceFile: normalized,
+        rawSpecifier: edge.rawSpecifier,
+        edgeKind: edge.edgeKind,
+        projectId: project.id,
+        confidence: resolved.confidence,
+        resolvedTarget: resolved.target,
+        unresolvedReason: resolved.reason,
+      };
+    });
+
+    this.depsByFile.set(normalized, edges);
+    for (const edge of edges) {
+      const specSet = this.importersBySpecifier.get(edge.rawSpecifier) ?? new Set<string>();
+      specSet.add(normalized);
+      this.importersBySpecifier.set(edge.rawSpecifier, specSet);
+
+      if (edge.resolvedTarget) {
+        const targetSet = this.importersByTarget.get(edge.resolvedTarget) ?? new Set<string>();
+        targetSet.add(normalized);
+        this.importersByTarget.set(edge.resolvedTarget, targetSet);
+      }
+    }
+
+    const declarations: TsSymbolDeclaration[] = facts.declarations.map((decl) => ({
+      name: decl.name,
+      kind: decl.kind,
+      filePath: normalized,
+      absolutePath: absoluteNormalized,
+      position: decl.position,
+      line: decl.line,
+      projectId: project.id,
+    }));
+
+    this.declarationsByFile.set(normalized, declarations);
+    for (const declaration of declarations) {
+      const bucket = this.declarationsBySymbol.get(declaration.name) ?? [];
+      bucket.push(declaration);
+      this.declarationsBySymbol.set(declaration.name, bucket);
+    }
+
+    this.bumpProjectVersion(project.id);
+  }
+
+  private removeFileAnalysis(relativePath: string): void {
+    const normalized = normalizePath(relativePath);
+
+    const previousEdges = this.depsByFile.get(normalized) ?? [];
+    for (const edge of previousEdges) {
+      const specSet = this.importersBySpecifier.get(edge.rawSpecifier);
+      if (specSet) {
+        specSet.delete(normalized);
+        if (specSet.size === 0) {
+          this.importersBySpecifier.delete(edge.rawSpecifier);
+        }
+      }
+
+      if (edge.resolvedTarget) {
+        const targetSet = this.importersByTarget.get(edge.resolvedTarget);
+        if (targetSet) {
+          targetSet.delete(normalized);
+          if (targetSet.size === 0) {
+            this.importersByTarget.delete(edge.resolvedTarget);
+          }
+        }
+      }
+    }
+    this.depsByFile.delete(normalized);
+
+    const previousDecls = this.declarationsByFile.get(normalized) ?? [];
+    for (const declaration of previousDecls) {
+      const bucket = this.declarationsBySymbol.get(declaration.name);
+      if (!bucket) continue;
+
+      const remaining = bucket.filter(
+        (entry) => !(entry.filePath === declaration.filePath && entry.line === declaration.line && entry.kind === declaration.kind),
+      );
+
+      if (remaining.length === 0) {
+        this.declarationsBySymbol.delete(declaration.name);
+      } else {
+        this.declarationsBySymbol.set(declaration.name, remaining);
+      }
+    }
+    this.declarationsByFile.delete(normalized);
+
+    const absolute = this.absoluteByRelative.get(normalized);
+    if (absolute) {
+      this.relativeByAbsolute.delete(absolute);
+      this.absoluteByRelative.delete(normalized);
+    }
+
+    const projectId = this.projectByFile.get(normalized);
+    this.projectByFile.delete(normalized);
+
+    if (projectId) {
+      const project = this.projectIndex.get(projectId);
+      if (project && absolute) {
+        project.files.delete(absolute);
+      }
+      if (project && project.files.size === 0) {
+        this.projectIndex.delete(projectId);
+      }
+      this.bumpProjectVersion(projectId);
+    }
+  }
+
+  private bumpProjectVersion(projectId: string): void {
+    const next = (this.projectVersions.get(projectId) ?? 0) + 1;
+    this.projectVersions.set(projectId, next);
+    this.projectProgramCache.delete(projectId);
+  }
+
   private resolveReferenceTarget(symbol: string, filePath?: string): TsReferenceResolution {
     if (this.depsByFile.size === 0) {
       return {
@@ -321,15 +496,15 @@ export class TsDependencyService {
         };
       }
 
-      const fileDecls = this.declarationsByFile.get(resolvedFile) ?? [];
-      const exact = fileDecls.filter((decl) => decl.name === symbol);
+      const fileDeclarations = this.declarationsByFile.get(resolvedFile) ?? [];
+      const exact = fileDeclarations.filter((declaration) => declaration.name === symbol);
       const partial = exact.length > 0
         ? exact
-        : fileDecls.filter((decl) => decl.name.toLowerCase().includes(symbol.toLowerCase()));
+        : fileDeclarations.filter((declaration) => declaration.name.toLowerCase().includes(symbol.toLowerCase()));
 
       const candidates = partial
         .slice(0, 8)
-        .map((decl) => `${decl.filePath}:${decl.line} ${decl.kind} ${decl.name}`);
+        .map((declaration) => `${declaration.filePath}:${declaration.line} ${declaration.kind} ${declaration.name}`);
 
       if (exact.length === 0) {
         return {
@@ -361,7 +536,7 @@ export class TsDependencyService {
       return {
         kind: "resolved",
         declaration: exact[0],
-        candidates: exact.map((decl) => `${decl.filePath}:${decl.line} ${decl.kind} ${decl.name}`),
+        candidates: exact.map((declaration) => `${declaration.filePath}:${declaration.line} ${declaration.kind} ${declaration.name}`),
       };
     }
 
@@ -369,16 +544,16 @@ export class TsDependencyService {
       return {
         kind: "ambiguous",
         reason: `multiple exact TS symbol matches for '${symbol}'`,
-        candidates: exact.slice(0, 8).map((decl) => `${decl.filePath}:${decl.line} ${decl.kind} ${decl.name}`),
+        candidates: exact.slice(0, 8).map((declaration) => `${declaration.filePath}:${declaration.line} ${declaration.kind} ${declaration.name}`),
       };
     }
 
     const partial = Array.from(this.declarationsBySymbol.entries())
       .filter(([name]) => name.toLowerCase().includes(symbol.toLowerCase()))
-      .flatMap(([, decls]) => decls)
+      .flatMap(([, declarations]) => declarations)
       .sort((a, b) => a.filePath.localeCompare(b.filePath) || a.line - b.line)
       .slice(0, 8)
-      .map((decl) => `${decl.filePath}:${decl.line} ${decl.kind} ${decl.name}`);
+      .map((declaration) => `${declaration.filePath}:${declaration.line} ${declaration.kind} ${declaration.name}`);
 
     if (partial.length > 0) {
       return {
@@ -404,11 +579,7 @@ export class TsDependencyService {
       return [];
     }
 
-    const program = ts.createProgram({
-      rootNames: Array.from(project.files),
-      options: project.compilerOptions,
-    });
-
+    const program = this.getProjectProgram(declaration.projectId, project);
     const checker = program.getTypeChecker();
     const sourceFile = findSourceFileByName(program, declaration.absolutePath);
     if (!sourceFile) {
@@ -427,19 +598,18 @@ export class TsDependencyService {
       return [];
     }
 
-    const projectFiles = project.files;
-    const refs: string[] = [];
+    const references: string[] = [];
     const seen = new Set<string>();
 
     for (const candidateSource of program.getSourceFiles()) {
-      const abs = normalizePath(resolve(candidateSource.fileName));
-      if (!projectFiles.has(abs)) continue;
+      const absolute = normalizePath(resolve(candidateSource.fileName));
+      if (!project.files.has(absolute)) continue;
 
-      const relativePath = this.relativeFromAbsolute(abs);
+      const relativePath = this.relativeFromAbsolute(absolute);
       if (!relativePath) continue;
 
       const visit = (node: ts.Node) => {
-        if (refs.length >= options.limit) return;
+        if (references.length >= options.limit) return;
 
         if (ts.isIdentifier(node) && node.text === declaration.name) {
           const raw = checker.getSymbolAtLocation(node);
@@ -451,24 +621,46 @@ export class TsDependencyService {
               const start = node.getStart(candidateSource, false);
               const loc = candidateSource.getLineAndCharacterOfPosition(start);
               const key = `${relativePath}:${loc.line + 1}:${loc.character + 1}`;
+
               if (!seen.has(key)) {
                 seen.add(key);
-                refs.push(key);
+                references.push(key);
               }
             }
           }
         }
 
-        if (refs.length < options.limit) {
+        if (references.length < options.limit) {
           ts.forEachChild(node, visit);
         }
       };
 
       visit(candidateSource);
-      if (refs.length >= options.limit) break;
+      if (references.length >= options.limit) {
+        break;
+      }
     }
 
-    return refs;
+    return references;
+  }
+
+  private getProjectProgram(projectId: string, project: ProjectIndex): ts.Program {
+    const version = this.projectVersions.get(projectId) ?? 0;
+    const cached = this.projectProgramCache.get(projectId);
+
+    if (cached && cached.version === version) {
+      this.programCacheHits += 1;
+      return cached.program;
+    }
+
+    const program = ts.createProgram({
+      rootNames: Array.from(project.files),
+      options: project.compilerOptions,
+    });
+
+    this.programCacheMisses += 1;
+    this.projectProgramCache.set(projectId, { version, program });
+    return program;
   }
 
   private relativeFromAbsolute(absolutePath: string): string | null {
@@ -537,8 +729,8 @@ export class TsDependencyService {
       };
     }
 
-    const resolved = ts.resolveModuleName(raw, sourceAbsolutePath, project.compilerOptions, ts.sys);
-    const resolvedFile = resolved.resolvedModule?.resolvedFileName;
+    const resolvedModule = ts.resolveModuleName(raw, sourceAbsolutePath, project.compilerOptions, ts.sys);
+    const resolvedFile = resolvedModule.resolvedModule?.resolvedFileName;
 
     if (!resolvedFile) {
       if (!raw.startsWith(".") && !raw.startsWith("/")) {
@@ -689,12 +881,12 @@ function extractFileFacts(
   };
 
   const pushDeclaration = (nameNode: ts.Identifier, kind: string) => {
-    const pos = nameNode.getStart(source, false);
-    const line = source.getLineAndCharacterOfPosition(pos).line + 1;
+    const position = nameNode.getStart(source, false);
+    const line = source.getLineAndCharacterOfPosition(position).line + 1;
     declarations.push({
       name: nameNode.text,
       kind,
-      position: pos,
+      position,
       line,
     });
   };
@@ -754,23 +946,24 @@ function extractFileFacts(
 
   walk(source);
 
-  const dedupDecls = new Map<string, { name: string; kind: string; position: number; line: number }>();
-  for (const decl of declarations) {
-    const key = `${decl.name}:${decl.line}:${decl.kind}`;
-    if (!dedupDecls.has(key)) {
-      dedupDecls.set(key, decl);
+  const dedupDeclarations = new Map<string, { name: string; kind: string; position: number; line: number }>();
+  for (const declaration of declarations) {
+    const key = `${declaration.name}:${declaration.line}:${declaration.kind}`;
+    if (!dedupDeclarations.has(key)) {
+      dedupDeclarations.set(key, declaration);
     }
   }
 
   return {
     edges,
-    declarations: Array.from(dedupDecls.values()),
+    declarations: Array.from(dedupDeclarations.values()),
   };
 }
 
 function inferScriptKind(fileName: string): ts.ScriptKind {
-  const ext = extname(fileName).toLowerCase();
-  switch (ext) {
+  const extension = extname(fileName).toLowerCase();
+
+  switch (extension) {
     case ".tsx":
       return ts.ScriptKind.TSX;
     case ".jsx":
@@ -894,12 +1087,12 @@ function tryPathVariants(path: string): string[] {
   variants.add(path);
 
   if (!extname(path)) {
-    for (const ext of [".ts", ".tsx", ".js", ".jsx", ".mts", ".cts", ".mjs", ".cjs", ".d.ts"]) {
-      variants.add(`${path}${ext}`);
+    for (const extension of [".ts", ".tsx", ".js", ".jsx", ".mts", ".cts", ".mjs", ".cjs", ".d.ts"]) {
+      variants.add(`${path}${extension}`);
     }
 
-    for (const ext of [".ts", ".tsx", ".js", ".jsx", ".mts", ".cts", ".mjs", ".cjs"]) {
-      variants.add(`${path}/index${ext}`);
+    for (const extension of [".ts", ".tsx", ".js", ".jsx", ".mts", ".cts", ".mjs", ".cjs"]) {
+      variants.add(`${path}/index${extension}`);
     }
   }
 

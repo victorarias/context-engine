@@ -101,6 +101,54 @@ describe("Worktree watcher", () => {
     await engine.stopWatching();
     await engine.close();
   });
+
+  it("refreshes dependency/importer graph under watcher updates", async () => {
+    const dir = TempDir.create("ce-watcher-deps");
+    dirs.push(dir);
+
+    const sourceDir = join(dir.path, "repo", "src");
+    mkdirSync(sourceDir, { recursive: true });
+
+    const aPath = join(sourceDir, "a.ts");
+    const bPath = join(sourceDir, "b.ts");
+
+    writeFileSync(aPath, "export const greet = () => 'hi';\n");
+    writeFileSync(bPath, "import { greet } from './a';\nexport const run = greet;\n");
+
+    const config = ConfigSchema.parse({
+      sources: [{ path: sourceDir }],
+      dataDir: join(dir.path, "data"),
+      embedding: {
+        provider: "local",
+        localBackend: "mock",
+        dimensions: 64,
+      },
+      watcher: {
+        enabled: true,
+        pollIntervalMs: 50,
+        debounceMs: 100,
+      },
+    });
+
+    const engine = await ContextEngine.create(config);
+    await engine.index();
+    await engine.startWatching({ pollIntervalMs: 50, debounceMs: 100 });
+
+    await waitFor(async () => {
+      const importers = await engine.findImporters("a.ts");
+      return importers.includes("b.ts");
+    }, 4000);
+
+    writeFileSync(bPath, "export const run = 'detached';\n");
+
+    await waitFor(async () => {
+      const importers = await engine.findImporters("a.ts");
+      return !importers.includes("b.ts");
+    }, 5000);
+
+    await engine.stopWatching();
+    await engine.close();
+  });
 });
 
 async function waitFor(predicate: () => boolean | Promise<boolean>, timeoutMs: number): Promise<void> {

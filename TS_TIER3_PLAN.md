@@ -6,6 +6,15 @@ Status: phase 1-4 implemented (ongoing hardening)
 
 Deliver production-grade TypeScript dependency intelligence (TS equivalent of gopls-level trust for dependency/refactor workflows) while preserving local-first speed and resilience.
 
+## Recently completed
+
+- Incremental TS graph updates on reindex/watcher changes (add/update/delete)
+- TS Program cache reuse for reference queries (project-scoped cache with invalidation)
+- Status SLIs for query latency (`get_dependencies`, `find_importers`, `find_references`) and TS program-cache hit/miss
+- Restart-safe TS graph hydration from persisted metadata/worktree IDs
+- Fixture coverage for `extends` + `baseUrl/paths` + project references
+- Watcher freshness test coverage for dependency/importer updates
+
 ## Scope
 
 - Accurate per-file dependencies in TS/JS monorepos
