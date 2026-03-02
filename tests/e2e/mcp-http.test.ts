@@ -72,7 +72,7 @@ describe("MCP Server HTTP E2E", () => {
 
   it("serves MCP tools over streamable HTTP", async () => {
     const { tools } = await client.listTools();
-    expect(tools.length).toBeGreaterThanOrEqual(9);
+    expect(tools.length).toBeGreaterThanOrEqual(10);
 
     const status = await client.callTool({
       name: "status",

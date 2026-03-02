@@ -7,6 +7,7 @@ export interface Engine {
   getFileSummary(filePath: string): Promise<string>;
   getRecentChanges(query?: string): Promise<string>;
   getDependencies(filePath: string, options?: { recursive?: boolean; maxFiles?: number }): Promise<string>;
+  findImporters(target: string, options?: { limit?: number }): Promise<string>;
   findReferences(symbol: string, options?: { filePath?: string; includeDeclaration?: boolean; limit?: number }): Promise<string>;
   searchDocs(query: string): Promise<SearchResult[]>;
   status(): Promise<EngineStatus>;
@@ -61,6 +62,10 @@ export class StubEngine implements Engine {
 
   async getDependencies(filePath: string, _options?: { recursive?: boolean; maxFiles?: number }): Promise<string> {
     return `Dependencies for ${filePath}:\n- (placeholder — dependency analysis not yet implemented)`;
+  }
+
+  async findImporters(target: string): Promise<string> {
+    return `Importers for ${target}:\n- (placeholder — reverse dependency search not yet implemented)`;
   }
 
   async findReferences(symbol: string): Promise<string> {

@@ -164,9 +164,18 @@ async function status() {
     if (s.capabilities.goDependencies) {
       caps.push(`goDependencies=${s.capabilities.goDependencies}`);
     }
+    if (s.capabilities.tsDependencies) {
+      caps.push(`tsDependencies=${s.capabilities.tsDependencies}`);
+    }
     if (caps.length > 0) {
       console.log(`Capabilities: ${caps.join(", ")}`);
     }
+  }
+
+  if (s.tsDependencyGraph) {
+    console.log(
+      `TS graph: ${s.tsDependencyGraph.filesIndexed} files, ${s.tsDependencyGraph.edgesResolved}/${s.tsDependencyGraph.edgesTotal} edges resolved (${(s.tsDependencyGraph.resolutionSuccessRate * 100).toFixed(1)}%)`,
+    );
   }
 
   await engine.close();

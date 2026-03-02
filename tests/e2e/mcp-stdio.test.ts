@@ -79,10 +79,11 @@ describe("MCP Server E2E", () => {
     expect(names).toContain("get_file_summary");
     expect(names).toContain("get_recent_changes");
     expect(names).toContain("get_dependencies");
+    expect(names).toContain("find_importers");
     expect(names).toContain("find_references");
     expect(names).toContain("status");
     expect(names).toContain("execute");
-    expect(names.length).toBe(9);
+    expect(names.length).toBe(10);
   });
 
   it("semantic_search returns text content (not crash)", async () => {
@@ -156,6 +157,17 @@ describe("MCP Server E2E", () => {
     expect(result.content).toBeDefined();
     const text = (result.content[0] as { type: "text"; text: string }).text;
     expect(text).toContain("Dependencies");
+  });
+
+  it("find_importers returns reverse dependency output", async () => {
+    const result = (await client.callTool({
+      name: "find_importers",
+      arguments: { target: "src/engine/context-engine.ts", limit: 5 },
+    })) as CallToolResult;
+
+    expect(result.content).toBeDefined();
+    const text = (result.content[0] as { type: "text"; text: string }).text;
+    expect(text).toContain("Importers for");
   });
 
   it("find_references returns reference output", async () => {

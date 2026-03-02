@@ -63,6 +63,7 @@ const SCRIPTABLE_TOOL_NAMES = [
   "get_file_summary",
   "get_recent_changes",
   "get_dependencies",
+  "find_importers",
   "find_references",
   "status",
 ] as const;
@@ -188,9 +189,18 @@ function formatStatus(status: Awaited<ReturnType<Engine["status"]>>): string {
     if (status.capabilities.goDependencies) {
       caps.push(`goDependencies=${status.capabilities.goDependencies}`);
     }
+    if (status.capabilities.tsDependencies) {
+      caps.push(`tsDependencies=${status.capabilities.tsDependencies}`);
+    }
     if (caps.length > 0) {
       lines.push(`Capabilities: ${caps.join(", ")}`);
     }
+  }
+
+  if (status.tsDependencyGraph) {
+    lines.push(
+      `TS graph: ${status.tsDependencyGraph.filesIndexed} files, ${status.tsDependencyGraph.edgesResolved}/${status.tsDependencyGraph.edgesTotal} edges resolved (${(status.tsDependencyGraph.resolutionSuccessRate * 100).toFixed(1)}%)`,
+    );
   }
 
   return lines.join("\n");
@@ -244,6 +254,13 @@ async function executeScriptedCall(engine: Engine, call: ScriptedToolCall): Prom
       return engine.getDependencies(path, {
         recursive: call.args.recursive === true,
         maxFiles: optionalNumber(call.args.maxFiles),
+      });
+    }
+
+    case "find_importers": {
+      const target = requiredString(call.args.target, "target");
+      return engine.findImporters(target, {
+        limit: optionalNumber(call.args.limit),
       });
     }
 
@@ -395,11 +412,11 @@ export function createMcpServer(engine: Engine): McpServer {
 
   server.registerTool("get_dependencies", {
     description:
-      "What: Extract direct import dependencies for a file (or for all files in a directory). " +
-      "Supports Go import blocks + TS/JS/Python/Rust/Kotlin import patterns. " +
+      "What: Extract direct import dependencies for a file (or all files in a directory). " +
+      "Uses TS compiler-aware graph for TS/JS and static parsing for Go/Python/Rust/Kotlin. " +
       "Use when: scoping refactor impact quickly. " +
       "Prefer over: manual import scanning. " +
-      "Not for: reverse dependency or full transitive graph analysis.",
+      "Not for: full transitive graph analysis.",
     inputSchema: {
       path: z.string().describe("File path or directory path to analyze"),
       recursive: z.boolean().optional().default(false).describe("When path is a directory: include nested files recursively."),
@@ -411,6 +428,25 @@ export function createMcpServer(engine: Engine): McpServer {
       maxFiles: args.maxFiles,
     });
     return { content: [{ type: "text", text: deps }] };
+  }));
+
+  // ─── find_importers ──────────────────────────────────────────────
+
+  server.registerTool("find_importers", {
+    description:
+      "What: Reverse dependency lookup (which files import/re-export a target). " +
+      "Use when: scoping downstream refactor impact. " +
+      "Prefer over: manual grep over import statements. " +
+      "Not for: runtime dynamic-loading analysis.",
+    inputSchema: {
+      target: z.string().describe("Target file path or import specifier to find importers for."),
+      limit: z.number().optional().default(100).describe("Maximum importers to return."),
+    },
+  }, async (args) => withToolLogging("find_importers", args, async () => {
+    const text = await engine.findImporters(args.target, {
+      limit: args.limit,
+    });
+    return { content: [{ type: "text", text }] };
   }));
 
   // ─── find_references ─────────────────────────────────────────────
@@ -447,8 +483,8 @@ export function createMcpServer(engine: Engine): McpServer {
     inputSchema: {
       code: z.string().describe(
         "TypeScript plan builder. Assign `output` to an array or { calls: [...] } where each call is { tool, args }. " +
-        "Example: output = [{ tool: 'find_files', args: { pattern: '*.ts' } }, { tool: 'find_references', args: { symbol: 'Start' } }]. " +
-        "Allowed tools: semantic_search, find_files, get_symbols, get_file_summary, get_recent_changes, get_dependencies, find_references, status.",
+        "Example: output = [{ tool: 'find_files', args: { pattern: '*.ts' } }, { tool: 'find_importers', args: { target: 'src/app.ts' } }]. " +
+        "Allowed tools: semantic_search, find_files, get_symbols, get_file_summary, get_recent_changes, get_dependencies, find_importers, find_references, status.",
       ),
       input: z.unknown().optional().describe("Read-only input object available as `input` in sandbox."),
       timeoutMs: z.number().optional().default(5000).describe("Sandbox execution timeout in milliseconds."),

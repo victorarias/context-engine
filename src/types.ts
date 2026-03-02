@@ -203,5 +203,14 @@ export interface EngineStatus {
     goReferencesBinary?: "available" | "unavailable";
     goReferencesSelection?: "requires-anchor-for-ambiguous-symbols";
     goDependencies?: "native";
+    tsDependencies?: "compiler-api";
+  };
+  tsDependencyGraph?: {
+    filesIndexed: number;
+    edgesTotal: number;
+    edgesResolved: number;
+    edgesUnresolved: number;
+    resolutionSuccessRate: number;
+    lastBuiltAt: number;
   };
 }

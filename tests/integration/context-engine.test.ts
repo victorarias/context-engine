@@ -170,6 +170,10 @@ func Use(s *Service, ctx context.Context) {
     expect(dirDeps).toContain("Dependencies for directory features");
     expect(dirDeps).toContain("features/unified/UnifiedScreen");
 
+    const importers = await engine.findImporters("features/unified/UnifiedScreen");
+    expect(importers).toContain("Importers for");
+    expect(importers).toContain("features/assistant/ChatPanel.tsx");
+
     await engine.close();
   });
 

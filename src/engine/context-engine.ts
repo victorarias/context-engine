@@ -13,6 +13,7 @@ import { getRecentGitChanges } from "../sources/git-history.js";
 import { chunkDocument, fetchDocument } from "../sources/doc-fetcher.js";
 import { WorktreeWatcher } from "./watcher.js";
 import { rerankCandidates } from "./reranker.js";
+import { TsDependencyService, type TsDependencyEdge } from "./ts-dependency-service.js";
 import {
   LanceVectorStore,
   SQLiteMetadataStore,
@@ -47,6 +48,7 @@ export class ContextEngine implements Engine {
   private readonly scanner = new LocalFileScanner();
   private readonly chunker = new HybridChunker();
   private readonly embedder: EmbeddingRuntimeProvider;
+  private readonly tsDeps: TsDependencyService;
 
   private indexing = false;
   private indexedFiles = 0;
@@ -70,6 +72,7 @@ export class ContextEngine implements Engine {
 
     this.indexedRoots = config.sources.map((s) => s.path);
     this.repoId = this.makeRepoId(this.indexedRoots);
+    this.tsDeps = new TsDependencyService(this.indexedRoots);
   }
 
   static async create(config: Config): Promise<ContextEngine> {
@@ -359,6 +362,18 @@ export class ContextEngine implements Engine {
       return this.getDirectoryDependencies(normalized, resolved, options);
     }
 
+    if (isTsLikePath(resolved)) {
+      const tsEdges = this.lookupTsEdgesForFile(normalized, resolved);
+      if (tsEdges.length === 0) {
+        return `No TypeScript/JavaScript dependencies found in ${filePath}`;
+      }
+
+      return [
+        `Dependencies for ${filePath} (ts-semantic):`,
+        ...formatTsEdges(tsEdges),
+      ].join("\n");
+    }
+
     const content = readFileSync(resolved, "utf-8");
     const deps = extractDependencies(content, resolved, this.indexedRoots).slice(0, 200);
 
@@ -369,6 +384,30 @@ export class ContextEngine implements Engine {
     return [
       `Dependencies for ${filePath}:`,
       ...deps.map((d) => `- ${d}`),
+    ].join("\n");
+  }
+
+  async findImporters(target: string, options?: { limit?: number }): Promise<string> {
+    const query = target.trim();
+    if (!query) {
+      return "Missing target for importer search.";
+    }
+
+    const normalized = normalizePathForLookup(query, this.indexedRoots) ?? normalizeFilePath(query);
+    const importers = this.tsDeps.findImporters(normalized, {
+      limit: options?.limit,
+    });
+
+    if (importers.length === 0) {
+      return [
+        `Importers for ${query}:`,
+        "No importers found in TS dependency graph.",
+      ].join("\n");
+    }
+
+    return [
+      `Importers for ${query}:`,
+      ...importers.map((entry) => `- ${entry}`),
     ].join("\n");
   }
 
@@ -451,17 +490,28 @@ export class ContextEngine implements Engine {
       const absolutePath = this.resolveFileOnDisk(relativePath);
       if (!absolutePath || !existsSync(absolutePath)) continue;
 
-      let content: string;
-      try {
-        content = readFileSync(absolutePath, "utf-8");
-      } catch {
-        continue;
+      let deps: string[] = [];
+
+      if (isTsLikePath(absolutePath)) {
+        const tsEdges = this.tsDeps.getFileEdges(relativePath);
+        deps = tsEdges
+          .map((edge) => edge.resolvedTarget ?? edge.rawSpecifier)
+          .filter(Boolean)
+          .slice(0, 80);
+      } else {
+        let content: string;
+        try {
+          content = readFileSync(absolutePath, "utf-8");
+        } catch {
+          continue;
+        }
+
+        deps = extractDependencies(content, absolutePath, this.indexedRoots).slice(0, 80);
       }
 
-      const deps = extractDependencies(content, absolutePath, this.indexedRoots).slice(0, 50);
       if (deps.length === 0) continue;
 
-      perFile.push({ file: relativePath, deps });
+      perFile.push({ file: relativePath, deps: Array.from(new Set(deps)).sort() });
       for (const dep of deps) {
         unique.add(dep);
       }
@@ -698,6 +748,8 @@ export class ContextEngine implements Engine {
       languageFileCounts[language] = (languageFileCounts[language] ?? 0) + 1;
     }
 
+    const tsStats = this.tsDeps.getStats();
+
     return {
       indexing: this.indexing,
       repos: [
@@ -718,6 +770,15 @@ export class ContextEngine implements Engine {
         goReferencesBinary: isGoplsAvailable() ? "available" : "unavailable",
         goReferencesSelection: "requires-anchor-for-ambiguous-symbols",
         goDependencies: "native",
+        tsDependencies: "compiler-api",
+      },
+      tsDependencyGraph: {
+        filesIndexed: tsStats.filesIndexed,
+        edgesTotal: tsStats.edgesTotal,
+        edgesResolved: tsStats.edgesResolved,
+        edgesUnresolved: tsStats.edgesUnresolved,
+        resolutionSuccessRate: tsStats.resolutionSuccessRate,
+        lastBuiltAt: tsStats.lastBuiltAt,
       },
     };
   }
@@ -725,6 +786,7 @@ export class ContextEngine implements Engine {
   async index(dirs?: string[]): Promise<void> {
     const roots = (dirs?.length ? dirs : this.config.sources.map((s) => s.path)).map((d) => resolve(d));
     this.indexedRoots = roots;
+    this.tsDeps.setRoots(roots);
 
     const startedAt = Date.now();
     let scannedFiles = 0;
@@ -872,6 +934,7 @@ export class ContextEngine implements Engine {
       }
 
       await this.indexDocs();
+      await this.rebuildTsDependencyGraph();
       await this.metadataStore.setIndexState("engine:lastIndexedAt", String(Date.now()));
 
       logEvent("info", "engine.index.complete", {
@@ -956,6 +1019,17 @@ export class ContextEngine implements Engine {
     await this.metadataStore.close();
     await this.embedder.close();
     logEvent("info", "engine.close.complete");
+  }
+
+  private async rebuildTsDependencyGraph(): Promise<void> {
+    const treeEntries = await this.metadataStore.getTreeEntries(this.primaryWorktreeId);
+    const dirtyEntries = await this.metadataStore.getDirtyFiles(this.primaryWorktreeId);
+    const visible = Array.from(new Set([
+      ...treeEntries.map((entry) => entry.path),
+      ...dirtyEntries.map((entry) => entry.path),
+    ])).sort();
+
+    this.tsDeps.rebuild(visible);
   }
 
   private async indexDocs(): Promise<void> {
@@ -1281,6 +1355,27 @@ export class ContextEngine implements Engine {
     return references;
   }
 
+  private lookupTsEdgesForFile(normalizedPath: string, absolutePath: string): TsDependencyEdge[] {
+    const candidates = new Set<string>([
+      normalizeFilePath(normalizedPath),
+      normalizeFilePath(relative(process.cwd(), absolutePath)),
+    ]);
+
+    for (const root of this.indexedRoots) {
+      candidates.add(normalizeFilePath(relative(resolve(root), absolutePath)));
+    }
+
+    for (const candidate of candidates) {
+      if (!candidate || candidate.startsWith("../")) continue;
+      const edges = this.tsDeps.getFileEdges(candidate);
+      if (edges.length > 0) {
+        return edges;
+      }
+    }
+
+    return [];
+  }
+
   private resolveFileOnDisk(filePath: string): string | null {
     const normalized = normalizeFilePath(filePath);
 
@@ -1319,6 +1414,31 @@ function matchesPattern(file: string, pattern: string): boolean {
   }
 
   return file.toLowerCase().includes(pattern.toLowerCase());
+}
+
+function isTsLikePath(path: string): boolean {
+  const ext = extname(path).toLowerCase();
+  return ext === ".ts" || ext === ".tsx" || ext === ".mts" || ext === ".cts" || ext === ".js" || ext === ".jsx" || ext === ".mjs" || ext === ".cjs";
+}
+
+function formatTsEdges(edges: TsDependencyEdge[]): string[] {
+  const seen = new Set<string>();
+  const lines: string[] = [];
+
+  for (const edge of edges) {
+    const target = edge.resolvedTarget ?? `unresolved:${edge.rawSpecifier}`;
+    const key = `${edge.edgeKind}:${target}:${edge.rawSpecifier}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+
+    if (edge.resolvedTarget) {
+      lines.push(`- [${edge.edgeKind}] ${edge.resolvedTarget} (from '${edge.rawSpecifier}')`);
+    } else {
+      lines.push(`- [${edge.edgeKind}] ${edge.rawSpecifier} (unresolved: ${edge.unresolvedReason ?? "unknown"})`);
+    }
+  }
+
+  return lines;
 }
 
 function extractDependencies(content: string, filePath?: string, roots: string[] = []): string[] {
