@@ -267,6 +267,44 @@ export function remoteCall() {
     await engine.close();
   });
 
+  it("finds go importers when go.mod lives in a subdirectory", async () => {
+    const tmp = TempDir.create("ce-engine-go-submodule");
+    dirs.push(tmp);
+
+    const repoDir = join(tmp.path, "repo");
+    const serverDir = join(repoDir, "server");
+    const llmDir = join(serverDir, "internal", "llm");
+    const conversationDir = join(serverDir, "internal", "conversation");
+
+    mkdirSync(llmDir, { recursive: true });
+    mkdirSync(conversationDir, { recursive: true });
+
+    writeFileSync(join(serverDir, "go.mod"), "module example.com/subrepo\n\ngo 1.22\n");
+    writeFileSync(join(llmDir, "service.go"), "package llm\n\nfunc New() int { return 1 }\n");
+    writeFileSync(
+      join(conversationDir, "service.go"),
+      "package conversation\n\nimport \"example.com/subrepo/internal/llm\"\n\nvar _ = llm.New\n",
+    );
+
+    const config = ConfigSchema.parse({
+      sources: [{ path: repoDir }],
+      dataDir: join(tmp.path, "data"),
+      embedding: {
+        provider: "local",
+        localBackend: "mock",
+        dimensions: 768,
+      },
+    });
+
+    const engine = await ContextEngine.create(config);
+    await engine.index();
+
+    const importers = await engine.findImporters("server/internal/llm");
+    expect(importers).toContain("server/internal/conversation/service.go");
+
+    await engine.close();
+  });
+
   it("parses Go dependencies and reference queries", async () => {
     const tmp = TempDir.create("ce-engine-go");
     dirs.push(tmp);

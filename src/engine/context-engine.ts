@@ -475,16 +475,31 @@ export class ContextEngine implements Engine {
       : normalizeFilePath(dirname(targetNoExt));
     const targetLooksLikePath = normalizedTarget.includes("/") || normalizedTarget.includes(".");
 
+    const aliasTargets = new Set<string>();
+    addTargetAlias(aliasTargets, normalizedTarget);
+    addTargetAlias(aliasTargets, targetNoExt);
+    if (normalizedTarget.endsWith(".go")) {
+      addTargetAlias(aliasTargets, targetDir);
+    }
+
     const resolvedCandidates = new Set<string>();
     if (resolvedTarget) {
       for (const root of this.indexedRoots) {
         const rel = normalizeFilePath(relative(resolve(root), resolvedTarget));
         if (!rel.startsWith("../") && rel !== "..") {
+          addTargetAlias(aliasTargets, rel);
+          addTargetAlias(aliasTargets, stripCodeExtension(rel));
+          addTargetAlias(aliasTargets, normalizeFilePath(dirname(rel)));
+
           resolvedCandidates.add(rel);
           resolvedCandidates.add(stripCodeExtension(rel));
           resolvedCandidates.add(normalizeFilePath(dirname(rel)));
         }
       }
+    }
+
+    for (const alias of buildGoTargetAliases(normalizedTarget, resolvedTarget)) {
+      addTargetAlias(aliasTargets, alias);
     }
 
     const matches = new Set<string>();
@@ -512,6 +527,7 @@ export class ContextEngine implements Engine {
             targetDir,
             targetLooksLikePath,
             resolvedCandidates,
+            aliasTargets,
           })
         ) {
           matches.add(relativePath);
@@ -1840,6 +1856,84 @@ function stripCodeExtension(path: string): string {
   return path.replace(/(?:\.d\.ts|\.tsx|\.ts|\.mts|\.cts|\.jsx|\.js|\.mjs|\.cjs|\.go|\.py|\.rs|\.kt|\.kts|\.java)$/i, "");
 }
 
+function addTargetAlias(out: Set<string>, value: string): void {
+  const normalized = normalizeFilePath(value).trim();
+  if (!normalized || normalized === "." || normalized === "/") return;
+  out.add(normalized);
+}
+
+function buildGoTargetAliases(normalizedTarget: string, resolvedTarget: string | null): Set<string> {
+  const aliases = new Set<string>();
+  if (!resolvedTarget) return aliases;
+
+  let targetDirAbsolute = resolvedTarget;
+  try {
+    const st = statSync(resolvedTarget);
+    if (st.isFile()) {
+      targetDirAbsolute = dirname(resolvedTarget);
+    }
+  } catch {
+    return aliases;
+  }
+
+  const moduleDir = findNearestGoModuleDir(targetDirAbsolute);
+  if (!moduleDir) return aliases;
+
+  const modulePath = parseGoModulePath(resolve(moduleDir, "go.mod"));
+  if (!modulePath) return aliases;
+
+  const relFromModule = normalizeFilePath(relative(moduleDir, targetDirAbsolute));
+  if (!relFromModule || relFromModule === "." || relFromModule.startsWith("../")) {
+    return aliases;
+  }
+
+  addTargetAlias(aliases, relFromModule);
+  addTargetAlias(aliases, stripCodeExtension(relFromModule));
+
+  addTargetAlias(aliases, `${modulePath}/${relFromModule}`);
+  addTargetAlias(aliases, `${modulePath}/${stripCodeExtension(relFromModule)}`);
+
+  if (normalizedTarget.startsWith("server/")) {
+    const trimmed = normalizedTarget.slice("server/".length);
+    addTargetAlias(aliases, trimmed);
+    addTargetAlias(aliases, stripCodeExtension(trimmed));
+  }
+
+  return aliases;
+}
+
+function findNearestGoModuleDir(startPath: string): string | null {
+  let current = resolve(startPath);
+
+  while (true) {
+    const goModPath = resolve(current, "go.mod");
+    if (existsSync(goModPath)) {
+      return current;
+    }
+
+    const parent = dirname(current);
+    if (parent === current) {
+      return null;
+    }
+
+    current = parent;
+  }
+}
+
+function parseGoModulePath(goModPath: string): string | null {
+  if (!existsSync(goModPath)) return null;
+
+  let content: string;
+  try {
+    content = readFileSync(goModPath, "utf-8");
+  } catch {
+    return null;
+  }
+
+  const match = content.match(/^\s*module\s+([^\s]+)\s*$/m);
+  return match?.[1]?.trim() || null;
+}
+
 function dependencyMatchesTarget(
   dep: string,
   context: {
@@ -1848,11 +1942,12 @@ function dependencyMatchesTarget(
     targetDir: string;
     targetLooksLikePath: boolean;
     resolvedCandidates: Set<string>;
+    aliasTargets: Set<string>;
   },
 ): boolean {
   if (!dep) return false;
 
-  if (dep === context.normalizedTarget || dep === context.targetNoExt) {
+  if (context.aliasTargets.has(dep)) {
     return true;
   }
 
@@ -1868,6 +1963,12 @@ function dependencyMatchesTarget(
       dep.endsWith(`/${context.targetDir}`)
     ) {
       return true;
+    }
+
+    for (const alias of context.aliasTargets) {
+      if (dep.endsWith(`/${alias}`)) {
+        return true;
+      }
     }
   }
 
