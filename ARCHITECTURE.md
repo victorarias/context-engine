@@ -345,7 +345,7 @@ async function search(query: string, worktreeId: string): Promise<Result[]> {
     "dimensions": 768,
     "fallbackToMock": true
   },
-  "dataDir": ".context-engine",
+  "dataDir": "~/.context-engine/<repo-aware-subdir>",
   "server": {
     "transport": "stdio",
     "port": 3777

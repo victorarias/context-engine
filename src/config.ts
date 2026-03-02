@@ -1,6 +1,9 @@
 import { z } from "zod";
 import { readFileSync, existsSync } from "node:fs";
 import { resolve, dirname } from "node:path";
+import { createHash } from "node:crypto";
+import { homedir } from "node:os";
+import { detectGitWorktree } from "./sources/git-worktree.js";
 
 // ─── Schema ────────────────────────────────────────────────────────────
 
@@ -142,9 +145,21 @@ export function loadConfig(pathOrDir?: string): Config {
   }
 
   // No config file found — use defaults, add current dir as source
-  return ConfigSchema.parse({
+  const config = ConfigSchema.parse({
     sources: [{ path: dir }],
   });
+
+  config.sources = config.sources.map((s) => ({
+    ...s,
+    path: resolve(s.path),
+  }));
+  config.dataDir = deriveDefaultDataDir(config.sources.map((s) => s.path), dir);
+
+  return config;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === "object" && !Array.isArray(value);
 }
 
 function parseConfigFile(filePath: string): Config {
@@ -172,11 +187,52 @@ function parseConfigFile(filePath: string): Config {
   // Resolve relative source paths against config file directory
   const configDir = dirname(absPath);
   const config = result.data;
+  const parsedRecord = isRecord(parsed) ? parsed : {};
+  const hasExplicitDataDir = Object.prototype.hasOwnProperty.call(parsedRecord, "dataDir");
+
   config.sources = config.sources.map((s) => ({
     ...s,
     path: resolve(configDir, s.path),
   }));
-  config.dataDir = resolve(configDir, config.dataDir);
+
+  if (hasExplicitDataDir) {
+    config.dataDir = resolve(configDir, config.dataDir);
+  } else {
+    config.dataDir = deriveDefaultDataDir(config.sources.map((s) => s.path), configDir);
+  }
 
   return config;
+}
+
+function deriveDefaultDataDir(sourcePaths: string[], fallbackDir: string): string {
+  const root = resolve(sourcePaths[0] ?? fallbackDir);
+  const globalRoot = resolve(homedir(), ".context-engine");
+
+  const git = detectGitWorktree(root);
+  const pathLabel = formatPathLabel(root);
+  const pathHash = shortHash(root);
+
+  if (git) {
+    return resolve(globalRoot, `${git.repoId}-${git.worktreeId}-${pathLabel}-${pathHash}`);
+  }
+
+  return resolve(globalRoot, `nogit-${pathLabel}-${pathHash}`);
+}
+
+function formatPathLabel(path: string): string {
+  const normalized = path
+    .replaceAll("\\", "/")
+    .replace(/^\/+/, "")
+    .replace(/[^a-zA-Z0-9/_-]/g, "-")
+    .replaceAll("/", "-")
+    .replace(/-+/g, "-")
+    .replace(/^-|-$/g, "");
+
+  if (!normalized) return "root";
+  if (normalized.length <= 80) return normalized;
+  return normalized.slice(normalized.length - 80);
+}
+
+function shortHash(value: string): string {
+  return createHash("sha1").update(resolve(value)).digest("hex").slice(0, 12);
 }

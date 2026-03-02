@@ -1,8 +1,8 @@
 import { describe, expect, it, beforeEach, afterEach } from "bun:test";
 import { loadConfig, ConfigSchema } from "../../src/config.js";
 import { writeFileSync, mkdirSync, rmSync, existsSync } from "node:fs";
-import { join } from "node:path";
-import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
+import { tmpdir, homedir } from "node:os";
 
 describe("Config", () => {
   let tmpDir: string;
@@ -105,6 +105,9 @@ describe("Config", () => {
       expect(config.embedding.provider).toBe("local");
       expect(config.sources.length).toBe(1);
       expect(config.sources[0].path).toBe(tmpDir);
+      expect(config.dataDir.startsWith(resolve(homedir(), ".context-engine"))).toBe(true);
+      expect(config.dataDir.includes(".context-engine")).toBe(true);
+      expect(config.dataDir.includes("nogit-")).toBe(true);
     });
 
     it("resolves relative source paths against config dir", () => {
@@ -116,6 +119,17 @@ describe("Config", () => {
       const config = loadConfig(configPath);
       expect(config.sources[0].path).toBe(join(tmpDir, "src"));
       expect(config.sources[1].path).toBe(join(tmpDir, "..", "other"));
+    });
+
+    it("uses global derived dataDir when config omits dataDir", () => {
+      const configPath = join(tmpDir, "context-engine.json");
+      writeFileSync(configPath, JSON.stringify({
+        sources: [{ path: "." }],
+      }));
+
+      const config = loadConfig(configPath);
+      expect(config.dataDir.startsWith(resolve(homedir(), ".context-engine"))).toBe(true);
+      expect(config.dataDir.includes(".context-engine")).toBe(true);
     });
 
     it("resolves dataDir relative to config dir", () => {

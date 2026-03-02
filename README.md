@@ -54,7 +54,6 @@ Create `context-engine.json`:
 ```json
 {
   "sources": [{ "path": "./src" }],
-  "dataDir": "./.context-engine",
   "embedding": {
     "provider": "local",
     "localBackend": "onnx",
@@ -77,6 +76,11 @@ Create `context-engine.json`:
   ]
 }
 ```
+
+Default storage location (when `dataDir` is omitted):
+- `~/.context-engine/<repoId>-<worktreeId>-<path-label>-<hash>/`
+- This avoids writing `.context-engine` folders inside each repo.
+- You can still set `dataDir` explicitly if you want a custom location.
 
 Supported embedding providers are **only**:
 - `local`
