@@ -1671,7 +1671,7 @@ export class ContextEngine implements Engine {
       };
     }
 
-    const location = findSymbolPositionInFile(absolutePath, symbol, selected.startLine);
+    const location = findSymbolPositionInFile(absolutePath, symbol, selected.startLine, selected.kind);
     if (!location) {
       return {
         kind: "unresolved",
@@ -1705,7 +1705,7 @@ export class ContextEngine implements Engine {
     const output = execFileSync("gopls", args, {
       cwd: dirname(target.absolutePath),
       encoding: "utf-8",
-      stdio: ["ignore", "pipe", "ignore"],
+      stdio: ["ignore", "pipe", "pipe"],
     }).trim();
 
     if (!output) {
@@ -2151,35 +2151,97 @@ function findSymbolPositionInFile(
   absolutePath: string,
   symbol: string,
   preferredLine?: number,
+  symbolKind?: string,
 ): { line: number; column: number } | null {
   if (!existsSync(absolutePath)) return null;
 
   const content = readFileSync(absolutePath, "utf-8");
   const lines = content.split(/\r?\n/);
+  const wordPattern = new RegExp(`\\b${escapeRegExp(symbol)}\\b`);
+
+  const findInLine = (lineNo: number, declarationOnly: boolean): { line: number; column: number } | null => {
+    if (lineNo < 1 || lineNo > lines.length) return null;
+
+    const line = lines[lineNo - 1] ?? "";
+    if (isCommentLikeLine(line)) return null;
+
+    if (declarationOnly && !isLikelyDeclarationLine(line, symbol, symbolKind, absolutePath)) {
+      return null;
+    }
+
+    const column = line.search(wordPattern);
+    if (column < 0) return null;
+
+    return {
+      line: lineNo,
+      column: column + 1,
+    };
+  };
 
   if (preferredLine && preferredLine >= 1 && preferredLine <= lines.length) {
-    const preferred = lines[preferredLine - 1] ?? "";
-    const preferredIdx = preferred.indexOf(symbol);
-    if (preferredIdx >= 0) {
-      return {
-        line: preferredLine,
-        column: preferredIdx + 1,
-      };
+    for (let distance = 0; distance <= 20; distance++) {
+      const down = findInLine(preferredLine + distance, true);
+      if (down) return down;
+
+      if (distance > 0) {
+        const up = findInLine(preferredLine - distance, true);
+        if (up) return up;
+      }
     }
   }
 
-  for (let index = 0; index < lines.length; index++) {
-    const line = lines[index];
-    const col = line.indexOf(symbol);
-    if (col >= 0) {
-      return {
-        line: index + 1,
-        column: col + 1,
-      };
-    }
+  for (let lineNo = 1; lineNo <= lines.length; lineNo++) {
+    const match = findInLine(lineNo, true);
+    if (match) return match;
+  }
+
+  if (preferredLine && preferredLine >= 1 && preferredLine <= lines.length) {
+    const preferred = findInLine(preferredLine, false);
+    if (preferred) return preferred;
+  }
+
+  for (let lineNo = 1; lineNo <= lines.length; lineNo++) {
+    const match = findInLine(lineNo, false);
+    if (match) return match;
   }
 
   return null;
+}
+
+function isCommentLikeLine(line: string): boolean {
+  const trimmed = line.trim();
+  return trimmed.startsWith("//") || trimmed.startsWith("/*") || trimmed.startsWith("*") || trimmed.startsWith("*/");
+}
+
+function isLikelyDeclarationLine(line: string, symbol: string, symbolKind: string | undefined, absolutePath: string): boolean {
+  const escaped = escapeRegExp(symbol);
+  const ext = extname(absolutePath).toLowerCase();
+
+  if (ext === ".go") {
+    if (symbolKind === "method" || symbolKind === "function") {
+      return new RegExp(`\\bfunc\\b[^\\n]*\\b${escaped}\\b\\s*\\(`).test(line);
+    }
+
+    if (symbolKind === "class" || symbolKind === "interface" || symbolKind === "type") {
+      return new RegExp(`\\btype\\s+${escaped}\\s+(struct|interface|[A-Za-z_][\\w]*)\\b`).test(line);
+    }
+
+    return new RegExp(`\\b(type|func|var|const)\\b[^\\n]*\\b${escaped}\\b`).test(line);
+  }
+
+  if (symbolKind === "class") {
+    return new RegExp(`\\bclass\\s+${escaped}\\b`).test(line);
+  }
+
+  if (symbolKind === "interface") {
+    return new RegExp(`\\binterface\\s+${escaped}\\b`).test(line);
+  }
+
+  if (symbolKind === "function" || symbolKind === "method") {
+    return new RegExp(`\\bfunction\\s+${escaped}\\b|\\b${escaped}\\s*\\(`).test(line);
+  }
+
+  return new RegExp(`\\b${escaped}\\b`).test(line);
 }
 
 function inferLanguageFromPath(path: string): string {

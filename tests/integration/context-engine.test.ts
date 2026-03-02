@@ -324,6 +324,8 @@ import (
   "fmt"
 )
 
+// Service is used in reference lookup tests.
+// keep comment above type to test identifier anchoring.
 type Service struct{}
 
 func (s *Service) Start(ctx context.Context) {
@@ -375,6 +377,10 @@ func main() {
     const refs = await engine.findReferences("Start", { filePath: "service/service.go", limit: 10 });
     expect(refs).toContain("References for Start");
     expect(refs).toContain("Requested backend: gopls");
+
+    const typeRefs = await engine.findReferences("Service", { filePath: "service/service.go", limit: 10 });
+    expect(typeRefs).toContain("Requested backend: gopls");
+    expect(typeRefs).not.toContain("gopls failed");
 
     const ambiguous = await engine.findReferences("Sta", { limit: 10 });
     expect(ambiguous).toContain("Actual backend: none");
