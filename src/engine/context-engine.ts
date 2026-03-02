@@ -1,5 +1,6 @@
-import { readFileSync, existsSync } from "node:fs";
-import { basename, relative, resolve } from "node:path";
+import { readFileSync, existsSync, statSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { basename, dirname, extname, relative, resolve } from "node:path";
 import type { Config } from "../config.js";
 import type { Engine } from "./engine.js";
 import type { Chunk, EngineStatus, SearchResult, SymbolInfo } from "../types.js";
@@ -21,6 +22,23 @@ import {
 import { logError, logEvent } from "../observability/logger.js";
 
 const DEFAULT_WORKTREE_ID = "default-worktree";
+
+type GoReferenceResolution =
+  | {
+    kind: "resolved";
+    target: { absolutePath: string; line: number; column: number };
+    candidates: string[];
+  }
+  | {
+    kind: "ambiguous";
+    reason: string;
+    candidates: string[];
+  }
+  | {
+    kind: "unresolved";
+    reason: string;
+    candidates: string[];
+  };
 
 export class ContextEngine implements Engine {
   private readonly metadataStore: SQLiteMetadataStore;
@@ -245,7 +263,7 @@ export class ContextEngine implements Engine {
     ];
 
     if (symbols.length) {
-      lines.push("Top symbols:");
+      lines.push("Symbols (up to 8):");
       for (const sym of symbols.slice(0, 8)) {
         lines.push(`- ${sym.kind} ${sym.name} (${sym.startLine}-${sym.endLine})`);
       }
@@ -314,7 +332,10 @@ export class ContextEngine implements Engine {
     return lines.join("\n");
   }
 
-  async getDependencies(filePath: string): Promise<string> {
+  async getDependencies(
+    filePath: string,
+    options?: { recursive?: boolean; maxFiles?: number },
+  ): Promise<string> {
     const normalized = normalizePathForLookup(filePath, this.indexedRoots);
     if (!normalized) {
       return `Rejected path (outside source roots or secret): ${filePath}`;
@@ -322,17 +343,305 @@ export class ContextEngine implements Engine {
 
     const resolved = this.resolveFileOnDisk(normalized);
     if (!resolved || !existsSync(resolved)) {
-      return `File not found for dependency scan: ${filePath}`;
+      const suggestion = await this.buildDependencyPathSuggestion(normalized);
+      return `File not found for dependency scan: ${filePath}${suggestion ? `\n${suggestion}` : ""}`;
+    }
+
+    let stats;
+    try {
+      stats = statSync(resolved);
+    } catch {
+      const suggestion = await this.buildDependencyPathSuggestion(normalized);
+      return `File not found for dependency scan: ${filePath}${suggestion ? `\n${suggestion}` : ""}`;
+    }
+
+    if (stats.isDirectory()) {
+      return this.getDirectoryDependencies(normalized, resolved, options);
     }
 
     const content = readFileSync(resolved, "utf-8");
-    const deps = extractDependencies(content).slice(0, 100);
+    const deps = extractDependencies(content, resolved, this.indexedRoots).slice(0, 200);
 
     if (deps.length === 0) {
       return `No import dependencies detected in ${filePath}`;
     }
 
-    return [`Dependencies for ${filePath}:`, ...deps.map((d) => `- ${d}`)].join("\n");
+    return [
+      `Dependencies for ${filePath}:`,
+      ...deps.map((d) => `- ${d}`),
+    ].join("\n");
+  }
+
+  private async buildDependencyPathSuggestion(normalizedPath: string): Promise<string> {
+    const allFiles = await this.findFiles("", {
+      worktreeId: this.primaryWorktreeId,
+    });
+
+    const requestedDir = normalizeFilePath(dirname(normalizedPath));
+    const requestedBase = basename(normalizedPath);
+    const dirResolved = this.resolveFileOnDisk(requestedDir === "." ? "" : requestedDir);
+
+    const lines: string[] = [];
+
+    if (dirResolved && existsSync(dirResolved) && statSync(dirResolved).isDirectory()) {
+      const siblings = allFiles
+        .filter((file) => normalizeFilePath(dirname(file)) === requestedDir)
+        .slice(0, 10)
+        .map((file) => basename(file));
+
+      if (siblings.length > 0) {
+        lines.push(`Files in ${requestedDir === "." ? "/" : requestedDir}: ${siblings.join(", ")}`);
+      } else {
+        lines.push(`Directory exists (${requestedDir === "." ? "/" : requestedDir}) but has no indexed files.`);
+      }
+    }
+
+    const needle = requestedBase.toLowerCase().replace(/\.[^.]+$/, "");
+    const alternatives = allFiles
+      .filter((file) => {
+        const base = basename(file).toLowerCase();
+        const stem = base.replace(/\.[^.]+$/, "");
+        return base.includes(needle) || needle.includes(stem) || stem.includes(needle);
+      })
+      .slice(0, 8);
+
+    if (alternatives.length > 0) {
+      lines.push(`Did you mean: ${alternatives.join(", ")}`);
+    }
+
+    return lines.join("\n");
+  }
+
+  private async getDirectoryDependencies(
+    normalizedPath: string,
+    _absoluteDir: string,
+    options?: { recursive?: boolean; maxFiles?: number },
+  ): Promise<string> {
+    const recursive = options?.recursive ?? false;
+    const maxFiles = Math.max(1, Math.min(500, Math.floor(options?.maxFiles ?? 50)));
+
+    const allFiles = await this.findFiles("", {
+      worktreeId: this.primaryWorktreeId,
+    });
+
+    const normalizedDir = normalizeFilePath(normalizedPath).replace(/\/$/, "");
+
+    const matchingFiles = allFiles.filter((path) => {
+      if (!normalizedDir || normalizedDir === ".") {
+        return true;
+      }
+
+      const fileDir = normalizeFilePath(dirname(path));
+      if (recursive) {
+        return path === normalizedDir || path.startsWith(`${normalizedDir}/`) || fileDir === normalizedDir;
+      }
+
+      return fileDir === normalizedDir;
+    });
+
+    if (matchingFiles.length === 0) {
+      return `No indexed files found in directory: ${normalizedPath}`;
+    }
+
+    const scannedFiles = matchingFiles.slice(0, maxFiles);
+    const perFile: Array<{ file: string; deps: string[] }> = [];
+    const unique = new Set<string>();
+
+    for (const relativePath of scannedFiles) {
+      const absolutePath = this.resolveFileOnDisk(relativePath);
+      if (!absolutePath || !existsSync(absolutePath)) continue;
+
+      let content: string;
+      try {
+        content = readFileSync(absolutePath, "utf-8");
+      } catch {
+        continue;
+      }
+
+      const deps = extractDependencies(content, absolutePath, this.indexedRoots).slice(0, 50);
+      if (deps.length === 0) continue;
+
+      perFile.push({ file: relativePath, deps });
+      for (const dep of deps) {
+        unique.add(dep);
+      }
+    }
+
+    const lines: string[] = [
+      `Dependencies for directory ${normalizedPath} (${perFile.length} files with imports, scanned ${scannedFiles.length}${matchingFiles.length > scannedFiles.length ? ` of ${matchingFiles.length}` : ""}):`,
+    ];
+
+    for (const entry of perFile) {
+      lines.push(`- ${entry.file}`);
+      for (const dep of entry.deps) {
+        lines.push(`  - ${dep}`);
+      }
+    }
+
+    if (unique.size > 0) {
+      lines.push(`Unique dependencies (${unique.size}):`);
+      for (const dep of Array.from(unique).slice(0, 200)) {
+        lines.push(`- ${dep}`);
+      }
+    } else {
+      lines.push("No import dependencies detected in scanned files.");
+    }
+
+    return lines.join("\n");
+  }
+
+  async findReferences(
+    symbol: string,
+    options?: { filePath?: string; includeDeclaration?: boolean; limit?: number },
+  ): Promise<string> {
+    const query = symbol.trim();
+    if (!query) {
+      return "Missing symbol for reference search.";
+    }
+
+    const limit = Math.max(1, options?.limit ?? 50);
+    const includeDeclaration = options?.includeDeclaration ?? false;
+    const goResolution = await this.resolveGoReferenceTarget(query, options?.filePath);
+
+    const goplsInstalled = isGoplsAvailable();
+    const requestedBackend: "gopls" | "heuristic" =
+      goplsInstalled && (goResolution.kind !== "unresolved" || options?.filePath?.endsWith(".go") === true)
+        ? "gopls"
+        : "heuristic";
+
+    if (requestedBackend === "gopls") {
+      if (goResolution.kind === "ambiguous") {
+        return this.formatFindReferencesResponse({
+          symbol: query,
+          requestedBackend,
+          actualBackend: "none",
+          fallbackReason: goResolution.reason,
+          references: [],
+          candidates: goResolution.candidates,
+          guidance: "Provide `filePath` to the exact Go declaration to run gopls references precisely.",
+        });
+      }
+
+      if (goResolution.kind === "resolved") {
+        try {
+          const references = this.findGoReferencesWithGopls(goResolution.target, {
+            includeDeclaration,
+            limit,
+          });
+
+          if (references.length > 0) {
+            return this.formatFindReferencesResponse({
+              symbol: query,
+              requestedBackend,
+              actualBackend: "gopls",
+              references,
+              candidates: goResolution.candidates,
+            });
+          }
+
+          const fallback = await this.findReferencesHeuristic(query, {
+            filePath: options?.filePath,
+            limit,
+          });
+
+          return this.formatFindReferencesResponse({
+            symbol: query,
+            requestedBackend,
+            actualBackend: "heuristic",
+            fallbackReason: `gopls returned 0 references for ${goResolution.target.absolutePath}:${goResolution.target.line}:${goResolution.target.column}`,
+            references: fallback,
+            candidates: goResolution.candidates,
+          });
+        } catch (error) {
+          const fallback = await this.findReferencesHeuristic(query, {
+            filePath: options?.filePath,
+            limit,
+          });
+
+          return this.formatFindReferencesResponse({
+            symbol: query,
+            requestedBackend,
+            actualBackend: "heuristic",
+            fallbackReason: `gopls failed: ${error instanceof Error ? error.message : String(error)}`,
+            references: fallback,
+            candidates: goResolution.candidates,
+          });
+        }
+      }
+
+      const fallback = await this.findReferencesHeuristic(query, {
+        filePath: options?.filePath,
+        limit,
+      });
+
+      return this.formatFindReferencesResponse({
+        symbol: query,
+        requestedBackend,
+        actualBackend: "heuristic",
+        fallbackReason: goResolution.reason,
+        references: fallback,
+        candidates: goResolution.candidates,
+      });
+    }
+
+    const references = await this.findReferencesHeuristic(query, {
+      filePath: options?.filePath,
+      limit,
+    });
+
+    return this.formatFindReferencesResponse({
+      symbol: query,
+      requestedBackend,
+      actualBackend: "heuristic",
+      references,
+      fallbackReason: references.length === 0 ? "No symbol-service backend selected for this query." : undefined,
+    });
+  }
+
+  private formatFindReferencesResponse(params: {
+    symbol: string;
+    requestedBackend: "gopls" | "heuristic";
+    actualBackend: "gopls" | "heuristic" | "none";
+    references: string[];
+    fallbackReason?: string;
+    candidates?: string[];
+    guidance?: string;
+  }): string {
+    const lines = [
+      `References for ${params.symbol}:`,
+      `Requested backend: ${params.requestedBackend}`,
+      `Actual backend: ${params.actualBackend}`,
+    ];
+
+    if (params.fallbackReason) {
+      lines.push(`Fallback reason: ${params.fallbackReason}`);
+    }
+
+    if (params.candidates && params.candidates.length > 0) {
+      lines.push("Candidate declarations:");
+      for (const candidate of params.candidates.slice(0, 8)) {
+        lines.push(`- ${candidate}`);
+      }
+    }
+
+    if (params.references.length === 0) {
+      if (params.actualBackend === "none") {
+        lines.push("No call-site search executed.");
+      } else {
+        lines.push("No references found.");
+      }
+    } else {
+      lines.push("References:");
+      for (const ref of params.references) {
+        lines.push(`- ${ref}`);
+      }
+    }
+
+    if (params.guidance) {
+      lines.push(`Guidance: ${params.guidance}`);
+    }
+
+    return lines.join("\n");
   }
 
   async searchDocs(query: string): Promise<SearchResult[]> {
@@ -352,7 +661,13 @@ export class ContextEngine implements Engine {
   }
 
   async status(): Promise<EngineStatus> {
-    const chunksStored = await this.vectorStore.count();
+    let chunksStored = 0;
+    try {
+      chunksStored = await this.vectorStore.count();
+    } catch {
+      chunksStored = 0;
+    }
+
     const filesIndexed = (await this.metadataStore.getTreeEntries(this.primaryWorktreeId)).length;
     const lastIndexedRaw = await this.metadataStore.getIndexState("engine:lastIndexedAt");
     const lastIndexedAt = lastIndexedRaw ? Number(lastIndexedRaw) : 0;
@@ -370,6 +685,19 @@ export class ContextEngine implements Engine {
       ...chunkerWarnings,
     ].filter(Boolean) as string[];
 
+    const treeEntries = await this.metadataStore.getTreeEntries(this.primaryWorktreeId);
+    const dirtyEntries = await this.metadataStore.getDirtyFiles(this.primaryWorktreeId);
+    const visiblePaths = new Set<string>([
+      ...treeEntries.map((entry) => entry.path),
+      ...dirtyEntries.map((entry) => entry.path),
+    ]);
+
+    const languageFileCounts: Record<string, number> = {};
+    for (const filePath of visiblePaths) {
+      const language = inferLanguageFromPath(filePath);
+      languageFileCounts[language] = (languageFileCounts[language] ?? 0) + 1;
+    }
+
     return {
       indexing: this.indexing,
       repos: [
@@ -385,6 +713,12 @@ export class ContextEngine implements Engine {
         ? `${this.embedder.modelId} (warning: ${warningParts.join(" | ")})`
         : this.embedder.modelId,
       workerBusy: this.embedder.isBusy(),
+      languageFileCounts,
+      capabilities: {
+        goReferencesBinary: isGoplsAvailable() ? "available" : "unavailable",
+        goReferencesSelection: "requires-anchor-for-ambiguous-symbols",
+        goDependencies: "native",
+      },
     };
   }
 
@@ -761,6 +1095,192 @@ export class ContextEngine implements Engine {
     return root || "default-repo";
   }
 
+  private async resolveGoReferenceTarget(
+    symbol: string,
+    filePath?: string,
+  ): Promise<GoReferenceResolution> {
+    if (filePath) {
+      const normalized = normalizePathForLookup(filePath, this.indexedRoots);
+      if (!normalized) {
+        return {
+          kind: "unresolved",
+          reason: `filePath rejected by path security rules: ${filePath}`,
+          candidates: [],
+        };
+      }
+
+      const absolutePath = this.resolveFileOnDisk(normalized);
+      if (!absolutePath || extname(absolutePath).toLowerCase() !== ".go") {
+        return {
+          kind: "unresolved",
+          reason: `filePath is not a Go file or does not exist in index scope: ${filePath}`,
+          candidates: [],
+        };
+      }
+
+      const location = findSymbolPositionInFile(absolutePath, symbol);
+      if (!location) {
+        return {
+          kind: "unresolved",
+          reason: `symbol '${symbol}' was not found in ${filePath}`,
+          candidates: [],
+        };
+      }
+
+      return {
+        kind: "resolved",
+        target: {
+          absolutePath,
+          line: location.line,
+          column: location.column,
+        },
+        candidates: [`${normalized}:${location.line} symbol ${symbol}`],
+      };
+    }
+
+    const symbols = await this.metadataStore.getSymbols({
+      name: symbol,
+      repoId: this.repoId,
+    });
+
+    const goSymbols = symbols
+      .filter((entry) => entry.filePath.endsWith(".go"))
+      .sort((a, b) => a.startLine - b.startLine);
+
+    if (goSymbols.length === 0) {
+      return {
+        kind: "unresolved",
+        reason: `no indexed Go symbol candidates for '${symbol}'`,
+        candidates: [],
+      };
+    }
+
+    const exact = goSymbols.filter((entry) => entry.name === symbol);
+    const candidates = (exact.length > 0 ? exact : goSymbols)
+      .slice(0, 8)
+      .map((entry) => `${entry.filePath}:${entry.startLine} ${entry.kind} ${entry.name}`);
+
+    if (exact.length === 0) {
+      return {
+        kind: "ambiguous",
+        reason: `no exact Go symbol match for '${symbol}' (partial matches exist)`,
+        candidates,
+      };
+    }
+
+    if (exact.length > 1) {
+      return {
+        kind: "ambiguous",
+        reason: `multiple exact Go symbol matches for '${symbol}'`,
+        candidates,
+      };
+    }
+
+    const selected = exact[0];
+    const absolutePath = this.resolveFileOnDisk(selected.filePath);
+    if (!absolutePath) {
+      return {
+        kind: "unresolved",
+        reason: `resolved symbol path not found on disk: ${selected.filePath}`,
+        candidates,
+      };
+    }
+
+    const location = findSymbolPositionInFile(absolutePath, symbol, selected.startLine);
+    if (!location) {
+      return {
+        kind: "unresolved",
+        reason: `could not resolve symbol position for '${symbol}' in ${selected.filePath}`,
+        candidates,
+      };
+    }
+
+    return {
+      kind: "resolved",
+      target: {
+        absolutePath,
+        line: location.line,
+        column: location.column,
+      },
+      candidates,
+    };
+  }
+
+  private findGoReferencesWithGopls(
+    target: { absolutePath: string; line: number; column: number },
+    options: { includeDeclaration: boolean; limit: number },
+  ): string[] {
+    const args = ["references"];
+    if (options.includeDeclaration) {
+      args.push("-d");
+    }
+
+    args.push(`${target.absolutePath}:${target.line}:${target.column}`);
+
+    const output = execFileSync("gopls", args, {
+      cwd: dirname(target.absolutePath),
+      encoding: "utf-8",
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
+
+    if (!output) {
+      return [];
+    }
+
+    const refs = output
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .map(formatReferencePath)
+      .filter((line): line is string => !!line);
+
+    return Array.from(new Set(refs)).slice(0, options.limit);
+  }
+
+  private async findReferencesHeuristic(
+    symbol: string,
+    options: { filePath?: string; limit: number },
+  ): Promise<string[]> {
+    const escaped = escapeRegExp(symbol);
+    const pattern = new RegExp(`\\b${escaped}\\b`);
+    const restrictExtension = options.filePath ? extname(options.filePath).toLowerCase() : null;
+
+    const files = await this.findFiles("", {
+      worktreeId: this.primaryWorktreeId,
+    });
+
+    const references: string[] = [];
+
+    for (const relativePath of files) {
+      if (restrictExtension && extname(relativePath).toLowerCase() !== restrictExtension) {
+        continue;
+      }
+
+      const absolutePath = this.resolveFileOnDisk(relativePath);
+      if (!absolutePath || !existsSync(absolutePath)) continue;
+
+      let content: string;
+      try {
+        content = readFileSync(absolutePath, "utf-8");
+      } catch {
+        continue;
+      }
+
+      const lines = content.split(/\r?\n/);
+      for (let index = 0; index < lines.length; index++) {
+        const line = lines[index];
+        if (!pattern.test(line)) continue;
+
+        references.push(`${relativePath}:${index + 1}:${line.trim().slice(0, 200)}`);
+        if (references.length >= options.limit) {
+          return references;
+        }
+      }
+    }
+
+    return references;
+  }
+
   private resolveFileOnDisk(filePath: string): string | null {
     const normalized = normalizeFilePath(filePath);
 
@@ -801,23 +1321,82 @@ function matchesPattern(file: string, pattern: string): boolean {
   return file.toLowerCase().includes(pattern.toLowerCase());
 }
 
-function extractDependencies(content: string): string[] {
+function extractDependencies(content: string, filePath?: string, roots: string[] = []): string[] {
   const deps = new Set<string>();
+  const language = inferLanguageFromPath(filePath ?? "");
+
+  const add = (specifier: string) => {
+    const normalized = formatDependencySpecifier(specifier, {
+      sourceFilePath: filePath,
+      language,
+      roots,
+    });
+    deps.add(normalized);
+  };
+
+  if (language === "go") {
+    collectGoDependencies(content, deps);
+  }
 
   for (const match of content.matchAll(/import\s+[^"']*from\s+["']([^"']+)["']/g)) {
-    deps.add(match[1]);
+    add(match[1]);
   }
   for (const match of content.matchAll(/require\(["']([^"']+)["']\)/g)) {
-    deps.add(match[1]);
+    add(match[1]);
   }
   for (const match of content.matchAll(/^\s*from\s+([a-zA-Z0-9_\.]+)\s+import\s+/gm)) {
-    deps.add(match[1]);
+    add(match[1]);
   }
   for (const match of content.matchAll(/^\s*import\s+([a-zA-Z0-9_\.]+)/gm)) {
-    deps.add(match[1]);
+    add(match[1]);
+  }
+  for (const match of content.matchAll(/^\s*use\s+([^;]+);/gm)) {
+    add(match[1].trim());
   }
 
   return Array.from(deps).sort();
+}
+
+function collectGoDependencies(content: string, deps: Set<string>): void {
+  const blockRegex = /^\s*import\s*\(([^)]*)\)/gms;
+  for (const block of content.matchAll(blockRegex)) {
+    const body = block[1] ?? "";
+    for (const quoted of body.matchAll(/"([^"]+)"/g)) {
+      if (quoted[1]) deps.add(quoted[1]);
+    }
+  }
+
+  for (const single of content.matchAll(/^\s*import\s+(?:[._]\s+|[A-Za-z_][\w]*\s+)?"([^"]+)"\s*$/gm)) {
+    if (single[1]) deps.add(single[1]);
+  }
+}
+
+function formatDependencySpecifier(
+  specifier: string,
+  context: { sourceFilePath?: string; language: string; roots: string[] },
+): string {
+  const trimmed = specifier.trim();
+  if (!trimmed) return trimmed;
+
+  if (
+    (context.language === "typescript" || context.language === "javascript") &&
+    trimmed.startsWith(".") &&
+    context.sourceFilePath
+  ) {
+    const absolute = resolve(dirname(context.sourceFilePath), trimmed);
+    const normalized = normalizeFilePath(absolute);
+
+    for (const root of context.roots) {
+      const rel = normalizeFilePath(relative(resolve(root), absolute));
+      if (!rel.startsWith("../") && rel !== "..") {
+        return rel;
+      }
+    }
+
+    return normalized;
+  }
+
+  return trimmed;
 }
 
 function chunksToSymbols(chunks: Chunk[], repoId: string): SymbolInfo[] {
@@ -901,4 +1480,101 @@ function extractSymbols(content: string, filePath: string, repoId: string): Symb
     seen.add(key);
     return true;
   });
+}
+
+function formatReferencePath(line: string): string | null {
+  const match = line.match(/^(.*?):(\d+):(\d+)(?:-(\d+))?$/);
+  if (!match) return line;
+
+  const path = match[1];
+  const lineNo = Number(match[2]);
+  const startCol = Number(match[3]);
+  const endCol = match[4] ? Number(match[4]) : startCol;
+  return `${normalizeFilePath(path)}:${lineNo}:${startCol}-${endCol}`;
+}
+
+function findSymbolPositionInFile(
+  absolutePath: string,
+  symbol: string,
+  preferredLine?: number,
+): { line: number; column: number } | null {
+  if (!existsSync(absolutePath)) return null;
+
+  const content = readFileSync(absolutePath, "utf-8");
+  const lines = content.split(/\r?\n/);
+
+  if (preferredLine && preferredLine >= 1 && preferredLine <= lines.length) {
+    const preferred = lines[preferredLine - 1] ?? "";
+    const preferredIdx = preferred.indexOf(symbol);
+    if (preferredIdx >= 0) {
+      return {
+        line: preferredLine,
+        column: preferredIdx + 1,
+      };
+    }
+  }
+
+  for (let index = 0; index < lines.length; index++) {
+    const line = lines[index];
+    const col = line.indexOf(symbol);
+    if (col >= 0) {
+      return {
+        line: index + 1,
+        column: col + 1,
+      };
+    }
+  }
+
+  return null;
+}
+
+function inferLanguageFromPath(path: string): string {
+  switch (extname(path).toLowerCase()) {
+    case ".ts":
+    case ".tsx":
+      return "typescript";
+    case ".js":
+    case ".jsx":
+      return "javascript";
+    case ".py":
+      return "python";
+    case ".go":
+      return "go";
+    case ".rs":
+      return "rust";
+    case ".kt":
+    case ".kts":
+      return "kotlin";
+    case ".java":
+      return "java";
+    case ".md":
+      return "markdown";
+    case ".json":
+      return "json";
+    default:
+      return "text";
+  }
+}
+
+let GOPLS_AVAILABLE_CACHE: boolean | null = null;
+
+function isGoplsAvailable(): boolean {
+  if (GOPLS_AVAILABLE_CACHE !== null) {
+    return GOPLS_AVAILABLE_CACHE;
+  }
+
+  try {
+    execFileSync("gopls", ["version"], {
+      stdio: ["ignore", "ignore", "ignore"],
+    });
+    GOPLS_AVAILABLE_CACHE = true;
+  } catch {
+    GOPLS_AVAILABLE_CACHE = false;
+  }
+
+  return GOPLS_AVAILABLE_CACHE;
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }

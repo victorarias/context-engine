@@ -6,7 +6,8 @@ export interface Engine {
   getSymbols(query: { name?: string; filePath?: string; kind?: string }): Promise<SymbolInfo[]>;
   getFileSummary(filePath: string): Promise<string>;
   getRecentChanges(query?: string): Promise<string>;
-  getDependencies(filePath: string): Promise<string>;
+  getDependencies(filePath: string, options?: { recursive?: boolean; maxFiles?: number }): Promise<string>;
+  findReferences(symbol: string, options?: { filePath?: string; includeDeclaration?: boolean; limit?: number }): Promise<string>;
   searchDocs(query: string): Promise<SearchResult[]>;
   status(): Promise<EngineStatus>;
   index(dirs?: string[]): Promise<void>;
@@ -58,8 +59,12 @@ export class StubEngine implements Engine {
     return `Recent changes${query ? ` related to "${query}"` : ""}:\n- (placeholder — git history indexing not yet implemented)`;
   }
 
-  async getDependencies(filePath: string): Promise<string> {
+  async getDependencies(filePath: string, _options?: { recursive?: boolean; maxFiles?: number }): Promise<string> {
     return `Dependencies for ${filePath}:\n- (placeholder — dependency analysis not yet implemented)`;
+  }
+
+  async findReferences(symbol: string): Promise<string> {
+    return `References for ${symbol}:\n- (placeholder — reference search not yet implemented)`;
   }
 
   async searchDocs(query: string): Promise<SearchResult[]> {

@@ -1,0 +1,34 @@
+[
+  {
+    "query": "where is SendMessageV2 implemented",
+    "relevant": ["server/internal/conversation/grpc.go"]
+  },
+  {
+    "query": "register default tools",
+    "relevant": ["server/internal/agent/tools/register_default.go"]
+  },
+  {
+    "query": "how are tool results compacted",
+    "relevant": ["server/internal/agenticloop/compactor.go"]
+  },
+  {
+    "query": "authentication interceptor logic",
+    "relevant": ["server/internal/auth/interceptor.go"]
+  },
+  {
+    "query": "task service implementation",
+    "relevant": ["server/internal/task/service.go"]
+  },
+  {
+    "query": "workspace service",
+    "relevant": ["server/internal/workspace/service.go"]
+  },
+  {
+    "query": "assistant screen",
+    "relevant": ["website/src/features/assistant/AssistantScreen.tsx"]
+  },
+  {
+    "query": "conversation persistence",
+    "relevant": ["server/internal/conversation/postgres.go"]
+  }
+]

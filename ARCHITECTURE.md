@@ -30,7 +30,8 @@ then exposes semantic search and code intelligence tools to any MCP-compatible A
 ├──────────────────────────────────────────────────────────────┤
 │                      Tool Router                              │
 │  semantic_search · find_files · get_symbols · get_file_summary│
-│  get_recent_changes · get_dependencies · execute              │
+│  get_recent_changes · get_dependencies · find_references      │
+│  execute                                                      │
 ├──────────────────────────────────────────────────────────────┤
 │                     Query Engine                              │
 │  ┌─────────────┐  ┌──────────────┐  ┌─────────────────┐     │

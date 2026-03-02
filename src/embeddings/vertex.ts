@@ -1,4 +1,6 @@
 import { spawnSync } from "node:child_process";
+import { createSign } from "node:crypto";
+import { existsSync, readFileSync } from "node:fs";
 import type { EmbedPriority, EmbeddingRuntimeProvider } from "./runtime.js";
 
 type AccessTokenProvider = (opts?: { forceRefresh?: boolean }) => Promise<string>;
@@ -199,10 +201,25 @@ function isRetriableStatus(status: number): boolean {
   return status === 408 || status === 429 || status === 500 || status === 502 || status === 503 || status === 504;
 }
 
-async function defaultTokenProvider(_opts?: { forceRefresh?: boolean }): Promise<string> {
+type ServiceAccountCredential = {
+  client_email: string;
+  private_key: string;
+  token_uri?: string;
+};
+
+let serviceAccountTokenCache:
+  | { credentialPath: string; token: string; expiresAtMs: number }
+  | null = null;
+
+async function defaultTokenProvider(opts?: { forceRefresh?: boolean }): Promise<string> {
   const envToken = process.env.VERTEX_ACCESS_TOKEN ?? process.env.GOOGLE_OAUTH_ACCESS_TOKEN;
   if (envToken?.trim()) {
     return envToken.trim();
+  }
+
+  const credentialPath = process.env.GOOGLE_APPLICATION_CREDENTIALS?.trim();
+  if (credentialPath) {
+    return getServiceAccountAccessToken(credentialPath, opts?.forceRefresh ?? false);
   }
 
   const gcloud = spawnSync("gcloud", ["auth", "application-default", "print-access-token"], {
@@ -212,13 +229,107 @@ async function defaultTokenProvider(_opts?: { forceRefresh?: boolean }): Promise
   if (gcloud.status !== 0 || !gcloud.stdout.trim()) {
     const stderr = gcloud.stderr?.toString().trim();
     throw new Error(
-      "Unable to get Vertex access token. Set VERTEX_ACCESS_TOKEN (or GOOGLE_OAUTH_ACCESS_TOKEN) " +
+      "Unable to get Vertex access token. Set VERTEX_ACCESS_TOKEN (or GOOGLE_OAUTH_ACCESS_TOKEN), " +
+      "or set GOOGLE_APPLICATION_CREDENTIALS to a service-account key, " +
       "or run `gcloud auth application-default login`." +
       (stderr ? ` gcloud error: ${stderr}` : ""),
     );
   }
 
   return gcloud.stdout.trim();
+}
+
+async function getServiceAccountAccessToken(credentialPath: string, forceRefresh: boolean): Promise<string> {
+  const now = Date.now();
+
+  if (
+    !forceRefresh &&
+    serviceAccountTokenCache &&
+    serviceAccountTokenCache.credentialPath === credentialPath &&
+    now < serviceAccountTokenCache.expiresAtMs - 60_000
+  ) {
+    return serviceAccountTokenCache.token;
+  }
+
+  if (!existsSync(credentialPath)) {
+    throw new Error(`GOOGLE_APPLICATION_CREDENTIALS file not found: ${credentialPath}`);
+  }
+
+  const credential = JSON.parse(readFileSync(credentialPath, "utf-8")) as Partial<ServiceAccountCredential>;
+  if (!credential.client_email || !credential.private_key) {
+    throw new Error(`Invalid service-account key file (missing client_email/private_key): ${credentialPath}`);
+  }
+
+  const tokenUri = credential.token_uri ?? "https://oauth2.googleapis.com/token";
+  const assertion = createServiceAccountAssertion({
+    clientEmail: credential.client_email,
+    privateKey: credential.private_key,
+    tokenUri,
+  });
+
+  const response = await fetch(tokenUri, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/x-www-form-urlencoded",
+    },
+    body: new URLSearchParams({
+      grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer",
+      assertion,
+    }),
+  });
+
+  if (!response.ok) {
+    throw new Error(`Service-account token exchange failed (${response.status}): ${truncate(await safeText(response))}`);
+  }
+
+  const json = (await response.json()) as {
+    access_token?: string;
+    expires_in?: number;
+  };
+
+  if (!json.access_token) {
+    throw new Error("Service-account token exchange missing access_token");
+  }
+
+  const expiresInMs = Math.max(60_000, (json.expires_in ?? 3600) * 1000);
+  serviceAccountTokenCache = {
+    credentialPath,
+    token: json.access_token,
+    expiresAtMs: now + expiresInMs,
+  };
+
+  return json.access_token;
+}
+
+function createServiceAccountAssertion(opts: {
+  clientEmail: string;
+  privateKey: string;
+  tokenUri: string;
+}): string {
+  const nowSec = Math.floor(Date.now() / 1000);
+  const header = base64UrlEncode(JSON.stringify({ alg: "RS256", typ: "JWT" }));
+  const payload = base64UrlEncode(JSON.stringify({
+    iss: opts.clientEmail,
+    scope: "https://www.googleapis.com/auth/cloud-platform",
+    aud: opts.tokenUri,
+    iat: nowSec,
+    exp: nowSec + 3600,
+  }));
+
+  const signingInput = `${header}.${payload}`;
+  const signature = createSign("RSA-SHA256")
+    .update(signingInput)
+    .sign(opts.privateKey, "base64url");
+
+  return `${signingInput}.${signature}`;
+}
+
+function base64UrlEncode(value: string): string {
+  return Buffer.from(value, "utf-8")
+    .toString("base64")
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/g, "");
 }
 
 async function safeText(response: Response): Promise<string> {

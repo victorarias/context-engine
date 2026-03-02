@@ -1,0 +1,36 @@
+[
+  { "query": "send message v2 grpc adapter", "relevant": ["server/internal/conversation/grpc.go"] },
+  { "query": "conversation postgres persistence", "relevant": ["server/internal/conversation/postgres.go"] },
+  { "query": "conversation service core", "relevant": ["server/internal/conversation/service.go"] },
+  { "query": "turn runtime orchestration", "relevant": ["server/internal/conversation/turn_runtime.go"] },
+  { "query": "conversation context provider", "relevant": ["server/internal/conversation/context_provider.go"] },
+  { "query": "active conversation state", "relevant": ["server/internal/conversation/active_conversation.go"] },
+
+  { "query": "tool result compaction", "relevant": ["server/internal/agenticloop/compactor.go"] },
+  { "query": "anthropic decision logic", "relevant": ["server/internal/agenticloop/anthropic_decider.go"] },
+
+  { "query": "register default agent tools", "relevant": ["server/internal/agent/tools/register_default.go"] },
+  { "query": "web search tool implementation", "relevant": ["server/internal/agent/tools/web_search.go"] },
+  { "query": "task create tool", "relevant": ["server/internal/agent/tools/task_create.go"] },
+  { "query": "spawn subagent tool", "relevant": ["server/internal/agent/tools/spawn_subagent.go"] },
+
+  { "query": "auth interceptor", "relevant": ["server/internal/auth/interceptor.go"] },
+  { "query": "auth service", "relevant": ["server/internal/auth/service.go"] },
+  { "query": "token parsing and validation", "relevant": ["server/internal/auth/token.go"] },
+
+  { "query": "task service implementation", "relevant": ["server/internal/task/service.go"] },
+  { "query": "task grpc adapter", "relevant": ["server/internal/task/grpc.go"] },
+
+  { "query": "workspace service", "relevant": ["server/internal/workspace/service.go"] },
+  { "query": "memory service", "relevant": ["server/internal/memory/service.go"] },
+  { "query": "jobs worker", "relevant": ["server/internal/jobs/worker.go"] },
+  { "query": "schedule executor", "relevant": ["server/internal/schedule/executor.go"] },
+
+  { "query": "chat service grpc generated interface", "relevant": ["server/internal/proto/huxie/v1/chat_grpc.pb.go"] },
+
+  { "query": "assistant screen component", "relevant": ["website/src/features/assistant/AssistantScreen.tsx"] },
+  { "query": "unified screen component", "relevant": ["website/src/features/unified/UnifiedScreen.tsx"] },
+  { "query": "send message hook in frontend", "relevant": ["website/src/hooks/useSendMessageV2.ts"] },
+
+  { "query": "global tools registry", "relevant": ["server/tools/tools.go"] }
+]

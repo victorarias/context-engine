@@ -10,6 +10,7 @@
     "mcp:status": "bun run src/cli.ts status",
     "mcp:doctor": "bun run src/cli.ts doctor",
     "mcp:probe": "bun run src/dev/mcp-probe.ts",
+    "eval:embeddings": "bun run src/dev/embedding-bakeoff.ts",
     "test:logs:prepare": "mkdir -p .context-engine/test-logs",
     "test": "bun run test:logs:prepare && CE_LOG_LEVEL=debug CE_LOG_FILE=.context-engine/test-logs/all.log bun test",
     "test:unit": "bun run test:logs:prepare && CE_LOG_LEVEL=debug CE_LOG_FILE=.context-engine/test-logs/unit.log bun test tests/unit/",

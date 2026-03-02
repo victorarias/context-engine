@@ -63,6 +63,7 @@ const SCRIPTABLE_TOOL_NAMES = [
   "get_file_summary",
   "get_recent_changes",
   "get_dependencies",
+  "find_references",
   "status",
 ] as const;
 
@@ -168,6 +169,30 @@ function formatStatus(status: Awaited<ReturnType<Engine["status"]>>): string {
     lines.push(`  ${repo.path} — ${repo.filesIndexed} files, ${repo.chunksStored} chunks`);
   }
 
+  if (status.languageFileCounts && Object.keys(status.languageFileCounts).length > 0) {
+    const summary = Object.entries(status.languageFileCounts)
+      .sort((a, b) => b[1] - a[1])
+      .map(([lang, count]) => `${lang}:${count}`)
+      .join(", ");
+    lines.push(`Indexed languages: ${summary}`);
+  }
+
+  if (status.capabilities) {
+    const caps: string[] = [];
+    if (status.capabilities.goReferencesBinary) {
+      caps.push(`goReferencesBinary=${status.capabilities.goReferencesBinary}`);
+    }
+    if (status.capabilities.goReferencesSelection) {
+      caps.push(`goReferencesSelection=${status.capabilities.goReferencesSelection}`);
+    }
+    if (status.capabilities.goDependencies) {
+      caps.push(`goDependencies=${status.capabilities.goDependencies}`);
+    }
+    if (caps.length > 0) {
+      lines.push(`Capabilities: ${caps.join(", ")}`);
+    }
+  }
+
   return lines.join("\n");
 }
 
@@ -216,7 +241,19 @@ async function executeScriptedCall(engine: Engine, call: ScriptedToolCall): Prom
 
     case "get_dependencies": {
       const path = requiredString(call.args.path, "path");
-      return engine.getDependencies(path);
+      return engine.getDependencies(path, {
+        recursive: call.args.recursive === true,
+        maxFiles: optionalNumber(call.args.maxFiles),
+      });
+    }
+
+    case "find_references": {
+      const symbol = requiredString(call.args.symbol, "symbol");
+      return engine.findReferences(symbol, {
+        filePath: optionalString(call.args.filePath),
+        includeDeclaration: call.args.includeDeclaration === true,
+        limit: optionalNumber(call.args.limit),
+      });
     }
 
     case "status": {
@@ -251,7 +288,8 @@ export function createMcpServer(engine: Engine): McpServer {
 
   server.registerTool("semantic_search", {
     description:
-      "What: Natural-language concept search over indexed code chunks. " +
+      "What: Natural-language concept search over indexed chunks (symbol-sized chunks for AST languages, " +
+      "~80-line windows with overlap otherwise). " +
       "Use when: you know behavior/intent but not exact identifiers. " +
       "Prefer over: grep for exploratory discovery. " +
       "Not for: exact literal matches or usage counting.",
@@ -273,10 +311,11 @@ export function createMcpServer(engine: Engine): McpServer {
 
   server.registerTool("find_files", {
     description:
-      "What: Find indexed files by glob or substring (optionally scoped by worktree). " +
-      "Use when: you want fast discovery constrained to the indexed/worktree-visible set. " +
+      "What: Find files from the current index (configured source roots + visible worktree overlay), " +
+      "by glob or substring. " +
+      "Use when: you want index-scoped discovery consistent with other context-engine tools. " +
       "Prefer over: filesystem glob when index scope matters. " +
-      "Not for: searching file contents.",
+      "Not for: searching file contents (or discovering files not yet indexed).",
     inputSchema: {
       pattern: z.string().describe("Glob pattern or file name substring (e.g. '*.ts', 'auth')"),
       worktreeId: z.string().optional().describe("Scope to a specific worktree"),
@@ -324,7 +363,7 @@ export function createMcpServer(engine: Engine): McpServer {
 
   server.registerTool("get_file_summary", {
     description:
-      "What: Fast structural summary of an indexed file (chunks + top symbols). " +
+      "What: Fast structural summary of an indexed file (chunk count + symbol count + up to 8 symbol entries). " +
       "Use when: triaging large/unfamiliar files. " +
       "Prefer over: opening full source immediately. " +
       "Not for: line-level logic review.",
@@ -356,31 +395,60 @@ export function createMcpServer(engine: Engine): McpServer {
 
   server.registerTool("get_dependencies", {
     description:
-      "What: Extract direct import dependencies from one file (TS/JS/Python patterns). " +
-      "Use when: scoping a refactor and understanding what this file depends on. " +
+      "What: Extract direct import dependencies for a file (or for all files in a directory). " +
+      "Supports Go import blocks + TS/JS/Python/Rust/Kotlin import patterns. " +
+      "Use when: scoping refactor impact quickly. " +
       "Prefer over: manual import scanning. " +
       "Not for: reverse dependency or full transitive graph analysis.",
     inputSchema: {
-      path: z.string().describe("File path to analyze dependencies for"),
+      path: z.string().describe("File path or directory path to analyze"),
+      recursive: z.boolean().optional().default(false).describe("When path is a directory: include nested files recursively."),
+      maxFiles: z.number().optional().default(50).describe("When path is a directory: maximum files to scan."),
     },
   }, async (args) => withToolLogging("get_dependencies", args, async () => {
-    const deps = await engine.getDependencies(args.path);
+    const deps = await engine.getDependencies(args.path, {
+      recursive: args.recursive,
+      maxFiles: args.maxFiles,
+    });
     return { content: [{ type: "text", text: deps }] };
+  }));
+
+  // ─── find_references ─────────────────────────────────────────────
+
+  server.registerTool("find_references", {
+    description:
+      "What: Find symbol usages/call-sites. " +
+      "Use when: assessing refactor impact or tracing where an API is used. " +
+      "Prefer over: grep for semantics-aware Go references (uses gopls when target is resolvable). " +
+      "Not for: declaration lookup (use get_symbols). Pass `filePath` for ambiguous/common symbols.",
+    inputSchema: {
+      symbol: z.string().describe("Symbol name to find references for (e.g. 'Start', 'NewClient')"),
+      filePath: z.string().optional().describe("Optional file path containing the declaration (improves precision)."),
+      includeDeclaration: z.boolean().optional().default(false).describe("Include declaration location when backend supports it."),
+      limit: z.number().optional().default(50).describe("Maximum references to return."),
+    },
+  }, async (args) => withToolLogging("find_references", args, async () => {
+    const text = await engine.findReferences(args.symbol, {
+      filePath: args.filePath,
+      includeDeclaration: args.includeDeclaration,
+      limit: args.limit,
+    });
+    return { content: [{ type: "text", text }] };
   }));
 
   // ─── execute ─────────────────────────────────────────────────────
 
   server.registerTool("execute", {
     description:
-      "What: Code mode for batched MCP tool orchestration via TypeScript-generated call plans. " +
-      "Use when: a task needs multi-step/fan-out queries in one round trip. " +
-      "Prefer over: many sequential tool calls for repeatable workflows. " +
+      "What: Run multiple context-engine queries in one round trip using a TypeScript call plan. " +
+      "Use when: a task needs batched/fan-out lookups or repeatable analysis workflows. " +
+      "Prefer over: many sequential tool calls. " +
       "Not for: arbitrary host scripting or side effects (no filesystem/network/process access).",
     inputSchema: {
       code: z.string().describe(
         "TypeScript plan builder. Assign `output` to an array or { calls: [...] } where each call is { tool, args }. " +
-        "Example: output = [{ tool: 'find_files', args: { pattern: '*.ts' } }, { tool: 'get_symbols', args: { name: 'Auth' } }]. " +
-        "Allowed tools: semantic_search, find_files, get_symbols, get_file_summary, get_recent_changes, get_dependencies, status.",
+        "Example: output = [{ tool: 'find_files', args: { pattern: '*.ts' } }, { tool: 'find_references', args: { symbol: 'Start' } }]. " +
+        "Allowed tools: semantic_search, find_files, get_symbols, get_file_summary, get_recent_changes, get_dependencies, find_references, status.",
       ),
       input: z.unknown().optional().describe("Read-only input object available as `input` in sandbox."),
       timeoutMs: z.number().optional().default(5000).describe("Sandbox execution timeout in milliseconds."),
@@ -432,9 +500,9 @@ export function createMcpServer(engine: Engine): McpServer {
 
   server.registerTool("status", {
     description:
-      "What: Engine readiness snapshot (indexing state, worker activity, model warnings, repo stats). " +
-      "Use when: results look stale/empty or tool output is surprising. " +
-      "Prefer over: guessing engine freshness. " +
+      "What: Engine readiness + coverage snapshot (indexing state, worker activity, model warnings, repo stats, indexed language counts, capability flags). " +
+      "Use when: results look stale/empty, boundaries are unclear, or output is surprising. " +
+      "Prefer over: guessing engine freshness/support. " +
       "Not for: code discovery.",
   }, async () => withToolLogging("status", {}, async () => {
     const s = await engine.status();

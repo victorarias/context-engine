@@ -8,7 +8,7 @@ This plan operationalizes `ARCHITECTURE.md` into execution-ready work.
 
 - **M1 (Walking Skeleton): ✅ Complete**
   - MCP server + STDIO transport live
-  - 8 tools registered and callable (including `execute`)
+  - 9 tools registered and callable (including `execute` and `find_references`)
   - CLI commands (`serve`, `index`, `status`) implemented
   - E2E MCP tests passing
 - **M2 (Storage): ✅ Complete**
@@ -82,7 +82,7 @@ Validation status (latest):
 
 ### Tasks
 - [x] Create server bootstrap + STDIO transport
-- [x] Register tool set with schemas + handlers (now 8 tools including `execute`)
+- [x] Register tool set with schemas + handlers (now 9 tools including `execute` and `find_references`)
 - [x] Add config loader with defaults/validation
 - [x] Add stub engine interface used by all tools
 - [x] Add CLI commands: `serve`, `index`, `status`

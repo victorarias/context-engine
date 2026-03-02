@@ -9,6 +9,7 @@ export const TOOL_NAMES = [
   "get_file_summary",
   "get_recent_changes",
   "get_dependencies",
+  "find_references",
   "execute",
   "status",
 ] as const;

@@ -144,6 +144,31 @@ async function status() {
   for (const repo of s.repos) {
     console.log(`- ${repo.path}: ${repo.filesIndexed} files, ${repo.chunksStored} chunks`);
   }
+
+  if (s.languageFileCounts && Object.keys(s.languageFileCounts).length > 0) {
+    const languageSummary = Object.entries(s.languageFileCounts)
+      .sort((a, b) => b[1] - a[1])
+      .map(([lang, count]) => `${lang}:${count}`)
+      .join(", ");
+    console.log(`Indexed languages: ${languageSummary}`);
+  }
+
+  if (s.capabilities) {
+    const caps: string[] = [];
+    if (s.capabilities.goReferencesBinary) {
+      caps.push(`goReferencesBinary=${s.capabilities.goReferencesBinary}`);
+    }
+    if (s.capabilities.goReferencesSelection) {
+      caps.push(`goReferencesSelection=${s.capabilities.goReferencesSelection}`);
+    }
+    if (s.capabilities.goDependencies) {
+      caps.push(`goDependencies=${s.capabilities.goDependencies}`);
+    }
+    if (caps.length > 0) {
+      console.log(`Capabilities: ${caps.join(", ")}`);
+    }
+  }
+
   await engine.close();
 }
 

@@ -1,0 +1,46 @@
+[
+  {
+    "name": "local-minilm-l6-v2",
+    "embedding": {
+      "provider": "local",
+      "localBackend": "onnx",
+      "model": "Xenova/all-MiniLM-L6-v2",
+      "dimensions": 384,
+      "fallbackToMock": false
+    }
+  },
+  {
+    "name": "local-bge-small-en-v1.5",
+    "embedding": {
+      "provider": "local",
+      "localBackend": "onnx",
+      "model": "Xenova/bge-small-en-v1.5",
+      "dimensions": 384,
+      "fallbackToMock": false
+    }
+  },
+  {
+    "name": "local-nomic-embed-text-v1.5",
+    "embedding": {
+      "provider": "local",
+      "localBackend": "onnx",
+      "model": "Xenova/nomic-embed-text-v1.5",
+      "dimensions": 768,
+      "fallbackToMock": false
+    }
+  },
+  {
+    "name": "vertex-text-embedding-005",
+    "embedding": {
+      "provider": "vertex",
+      "projectId": "gen-lang-client-0011635660",
+      "location": "us-central1",
+      "model": "text-embedding-005",
+      "dimensions": 768,
+      "outputDimensions": 768,
+      "requestTimeoutMs": 30000,
+      "maxRetries": 2,
+      "retryBaseDelayMs": 250
+    }
+  }
+]

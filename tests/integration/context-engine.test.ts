@@ -72,6 +72,107 @@ describe("ContextEngine", () => {
     await engine.close();
   });
 
+  it("parses Go dependencies and reference queries", async () => {
+    const tmp = TempDir.create("ce-engine-go");
+    dirs.push(tmp);
+
+    const sourceDir = join(tmp.path, "repo", "src");
+    mkdirSync(sourceDir, { recursive: true });
+
+    writeFileSync(join(sourceDir, "go.mod"), "module example.com/ce-go\n\ngo 1.22\n");
+
+    writeFileSync(
+      join(sourceDir, "service.go"),
+      `package service
+
+import (
+  "context"
+  "fmt"
+)
+
+type Service struct{}
+
+func (s *Service) Start(ctx context.Context) {
+  fmt.Println(ctx)
+}
+
+func Use(s *Service, ctx context.Context) {
+  s.Start(ctx)
+}
+`,
+    );
+
+    const config = ConfigSchema.parse({
+      sources: [{ path: sourceDir }],
+      dataDir: join(tmp.path, "data"),
+      embedding: {
+        provider: "local",
+        localBackend: "mock",
+        dimensions: 768,
+      },
+    });
+
+    const engine = await ContextEngine.create(config);
+    await engine.index();
+
+    const deps = await engine.getDependencies("service.go");
+    expect(deps).toContain("context");
+    expect(deps).toContain("fmt");
+
+    const refs = await engine.findReferences("Start", { filePath: "service.go", limit: 10 });
+    expect(refs).toContain("References for Start");
+    expect(refs).toContain("Requested backend: gopls");
+
+    const ambiguous = await engine.findReferences("Sta", { limit: 10 });
+    expect(ambiguous).toContain("Actual backend: none");
+    expect(ambiguous).toContain("Candidate declarations:");
+    expect(ambiguous).toContain("Guidance: Provide `filePath`");
+
+    await engine.close();
+  });
+
+  it("suggests nearby files and supports directory dependency scans", async () => {
+    const tmp = TempDir.create("ce-engine-deps");
+    dirs.push(tmp);
+
+    const sourceDir = join(tmp.path, "repo", "src");
+    mkdirSync(join(sourceDir, "features", "assistant"), { recursive: true });
+    mkdirSync(join(sourceDir, "features", "unified"), { recursive: true });
+
+    writeFileSync(
+      join(sourceDir, "features", "assistant", "ChatPanel.tsx"),
+      "import UnifiedScreen from '../unified/UnifiedScreen';\nexport const ChatPanel = () => UnifiedScreen;\n",
+    );
+    writeFileSync(
+      join(sourceDir, "features", "unified", "UnifiedScreen.tsx"),
+      "export default function UnifiedScreen() { return null; }\n",
+    );
+
+    const config = ConfigSchema.parse({
+      sources: [{ path: sourceDir }],
+      dataDir: join(tmp.path, "data"),
+      embedding: {
+        provider: "local",
+        localBackend: "mock",
+        dimensions: 768,
+      },
+    });
+
+    const engine = await ContextEngine.create(config);
+    await engine.index();
+
+    const missing = await engine.getDependencies("features/assistant/Chat.tsx");
+    expect(missing).toContain("File not found for dependency scan");
+    expect(missing).toContain("Files in features/assistant");
+    expect(missing).toContain("ChatPanel.tsx");
+
+    const dirDeps = await engine.getDependencies("features", { recursive: true, maxFiles: 20 });
+    expect(dirDeps).toContain("Dependencies for directory features");
+    expect(dirDeps).toContain("features/unified/UnifiedScreen");
+
+    await engine.close();
+  });
+
   it("reindexes changed files and removes deleted files", async () => {
     const tmp = TempDir.create("ce-engine-reindex");
     dirs.push(tmp);

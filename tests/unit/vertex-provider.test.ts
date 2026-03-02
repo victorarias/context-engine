@@ -1,13 +1,25 @@
 import { afterEach, describe, expect, it, mock } from "bun:test";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { generateKeyPairSync } from "node:crypto";
 import { VertexEmbeddingProvider } from "../../src/embeddings/vertex.js";
 
 describe("VertexEmbeddingProvider", () => {
   const originalEnv = process.env.VERTEX_ACCESS_TOKEN;
+  const originalGoogleOauth = process.env.GOOGLE_OAUTH_ACCESS_TOKEN;
+  const originalGoogleCreds = process.env.GOOGLE_APPLICATION_CREDENTIALS;
   const originalFetch = globalThis.fetch;
 
   afterEach(() => {
     if (originalEnv === undefined) delete process.env.VERTEX_ACCESS_TOKEN;
     else process.env.VERTEX_ACCESS_TOKEN = originalEnv;
+
+    if (originalGoogleOauth === undefined) delete process.env.GOOGLE_OAUTH_ACCESS_TOKEN;
+    else process.env.GOOGLE_OAUTH_ACCESS_TOKEN = originalGoogleOauth;
+
+    if (originalGoogleCreds === undefined) delete process.env.GOOGLE_APPLICATION_CREDENTIALS;
+    else process.env.GOOGLE_APPLICATION_CREDENTIALS = originalGoogleCreds;
 
     globalThis.fetch = originalFetch;
   });
@@ -117,5 +129,58 @@ describe("VertexEmbeddingProvider", () => {
     const vectors = await provider.embed(["hello"]);
     expect(vectors.length).toBe(1);
     expect(calls).toBe(2);
+  });
+
+  it("uses GOOGLE_APPLICATION_CREDENTIALS service-account key when gcloud is unavailable", async () => {
+    delete process.env.VERTEX_ACCESS_TOKEN;
+    delete process.env.GOOGLE_OAUTH_ACCESS_TOKEN;
+
+    const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+
+    const tempDir = mkdtempSync(join(tmpdir(), "ce-vertex-sa-"));
+    const credentialPath = join(tempDir, "service-account.json");
+
+    writeFileSync(
+      credentialPath,
+      JSON.stringify({
+        type: "service_account",
+        client_email: "test-sa@example.iam.gserviceaccount.com",
+        private_key: privateKey.export({ type: "pkcs8", format: "pem" }).toString(),
+        token_uri: "https://oauth2.googleapis.com/token",
+      }),
+    );
+
+    process.env.GOOGLE_APPLICATION_CREDENTIALS = credentialPath;
+
+    const fetchMock = mock(async (url: string | URL, init?: RequestInit) => {
+      const s = String(url);
+
+      if (s.includes("oauth2.googleapis.com/token")) {
+        expect(init?.method).toBe("POST");
+        return new Response(
+          JSON.stringify({ access_token: "sa-token", expires_in: 3600, token_type: "Bearer" }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }
+
+      expect(s).toContain("aiplatform.googleapis.com");
+      expect((init?.headers as Record<string, string>).Authorization).toBe("Bearer sa-token");
+      return new Response(
+        JSON.stringify({ predictions: [{ embeddings: { values: [0.3, 0.7] } }] }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    });
+
+    globalThis.fetch = fetchMock as any;
+
+    const provider = new VertexEmbeddingProvider({
+      projectId: "demo-project",
+      dimensions: 2,
+    });
+
+    const vectors = await provider.embed(["hello"]);
+    expect(vectors.length).toBe(1);
+
+    rmSync(tempDir, { recursive: true, force: true });
   });
 });

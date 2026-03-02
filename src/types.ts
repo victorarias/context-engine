@@ -198,4 +198,10 @@ export interface EngineStatus {
   }>;
   embeddingModel: string;
   workerBusy: boolean;
+  languageFileCounts?: Record<string, number>;
+  capabilities?: {
+    goReferencesBinary?: "available" | "unavailable";
+    goReferencesSelection?: "requires-anchor-for-ambiguous-symbols";
+    goDependencies?: "native";
+  };
 }

@@ -41,6 +41,7 @@ bun run src/cli.ts reindex
 `bun run mcp` (`serve`) now performs an initial index and (by default) starts the worktree-aware watcher.
 Pass a custom config/path with `bun run mcp -- ./path/to/context-engine.json`.
 `get_recent_changes` now returns real git commit/file history for indexed git roots.
+`find_references` finds symbol usages/call-sites (Go uses `gopls` when available, heuristic fallback otherwise).
 `execute` runs isolated TypeScript "code mode" snippets that emit scripted MCP tool calls.
 HTTP MCP transport is supported via `server.transport = "http"`.
 
@@ -127,6 +128,7 @@ Vertex example:
 
 Vertex auth:
 - Set `VERTEX_ACCESS_TOKEN`, or
+- Set `GOOGLE_APPLICATION_CREDENTIALS` to a service-account key JSON (provider exchanges JWT for OAuth token), or
 - Run `gcloud auth application-default login` and the provider will use ADC token via gcloud.
 
 ## Test
@@ -137,6 +139,22 @@ bun run test:unit
 bun run test:integration
 bun run test:e2e
 bun run test:quality
+```
+
+Embedding model bakeoff (A/B compare on your repo + labeled queries):
+
+```bash
+cp eval/exsin-queries.example.json eval/exsin-queries.json
+cp eval/embedding-candidates.example.json eval/embedding-candidates.json
+# edit projectId/model candidates as needed
+
+bun run eval:embeddings -- \
+  --repo ~/projects/exsin \
+  --queries eval/exsin-queries.json \
+  --candidates eval/embedding-candidates.json \
+  --data-root ./.context-engine/bakeoff \
+  --limit 10 \
+  --out eval/embedding-bakeoff-report.json
 ```
 
 All test scripts run with engine debug logging enabled and write JSONL logs to:

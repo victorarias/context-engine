@@ -1,0 +1,26 @@
+[
+  {
+    "name": "local-minilm-l6-v2",
+    "embedding": {
+      "provider": "local",
+      "localBackend": "onnx",
+      "model": "Xenova/all-MiniLM-L6-v2",
+      "dimensions": 384,
+      "fallbackToMock": false
+    }
+  },
+  {
+    "name": "vertex-text-embedding-005",
+    "embedding": {
+      "provider": "vertex",
+      "projectId": "YOUR_GCP_PROJECT_ID",
+      "location": "us-central1",
+      "model": "text-embedding-005",
+      "dimensions": 768,
+      "outputDimensions": 768,
+      "requestTimeoutMs": 30000,
+      "maxRetries": 2,
+      "retryBaseDelayMs": 250
+    }
+  }
+]
