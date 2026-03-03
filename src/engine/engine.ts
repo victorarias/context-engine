@@ -1,14 +1,34 @@
 import type { SearchResult, SymbolInfo, EngineStatus } from "../types.js";
 
 export interface Engine {
-  search(query: string, options?: { worktreeId?: string; limit?: number; minScore?: number }): Promise<SearchResult[]>;
+  search(
+    query: string,
+    options?: {
+      worktreeId?: string;
+      limit?: number;
+      minScore?: number;
+      filePattern?: string;
+      excludePattern?: string;
+      language?: string;
+      codeOnly?: boolean;
+    },
+  ): Promise<SearchResult[]>;
   findFiles(pattern: string, options?: { worktreeId?: string }): Promise<string[]>;
   getSymbols(query: { name?: string; filePath?: string; kind?: string; limit?: number }): Promise<SymbolInfo[]>;
   getFileSummary(filePath: string): Promise<string>;
   getRecentChanges(options?: string | { query?: string; limit?: number; since?: string }): Promise<string>;
   getDependencies(filePath: string, options?: { recursive?: boolean; maxFiles?: number }): Promise<string>;
   findImporters(target: string, options?: { limit?: number }): Promise<string>;
-  findReferences(symbol: string, options?: { filePath?: string; includeDeclaration?: boolean; limit?: number }): Promise<string>;
+  findReferences(
+    symbol: string,
+    options?: {
+      filePath?: string;
+      includeDeclaration?: boolean;
+      includeContext?: boolean;
+      contextLines?: number;
+      limit?: number;
+    },
+  ): Promise<string>;
   searchDocs(query: string): Promise<SearchResult[]>;
   status(): Promise<EngineStatus>;
   index(dirs?: string[]): Promise<void>;
@@ -21,7 +41,17 @@ export interface Engine {
  * implementations as later milestones land.
  */
 export class StubEngine implements Engine {
-  async search(query: string, options?: { limit?: number; minScore?: number }): Promise<SearchResult[]> {
+  async search(
+    query: string,
+    options?: {
+      limit?: number;
+      minScore?: number;
+      filePattern?: string;
+      excludePattern?: string;
+      language?: string;
+      codeOnly?: boolean;
+    },
+  ): Promise<SearchResult[]> {
     return [
       {
         filePath: "src/example.ts",

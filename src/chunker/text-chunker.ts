@@ -24,17 +24,39 @@ export class TextChunker implements Chunker {
     }
   }
 
+  private resolveWindowConfig(language: string, filePath: string): { windowLines: number; overlapLines: number } {
+    const normalizedLanguage = language.toLowerCase();
+    const normalizedPath = filePath.toLowerCase();
+
+    if (
+      normalizedLanguage === "markdown" ||
+      normalizedPath.endsWith(".md") ||
+      normalizedPath.includes("transcript")
+    ) {
+      return {
+        windowLines: 32,
+        overlapLines: 8,
+      };
+    }
+
+    return {
+      windowLines: this.windowLines,
+      overlapLines: this.overlapLines,
+    };
+  }
+
   chunk(content: string, filePath: string, language: string, repoId: string): Chunk[] {
     if (!content.length) return [];
 
     const lines = content.split(/\r?\n/);
     if (lines.length === 0) return [];
 
+    const { windowLines, overlapLines } = this.resolveWindowConfig(language, filePath);
     const chunks: Chunk[] = [];
-    const step = this.windowLines - this.overlapLines;
+    const step = windowLines - overlapLines;
 
     for (let start = 0; start < lines.length; start += step) {
-      const endExclusive = Math.min(start + this.windowLines, lines.length);
+      const endExclusive = Math.min(start + windowLines, lines.length);
       const slice = lines.slice(start, endExclusive);
       const text = slice.join("\n").trimEnd();
       if (!text) continue;

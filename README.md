@@ -214,16 +214,18 @@ Once connected, your agent gets access to these tools:
 
 | Tool | What it does |
 |------|-------------|
-| **`semantic_search`** | Natural-language search over your codebase. Find code by intent, not keywords. |
+| **`semantic_search`** | Natural-language search over your codebase. Find code by intent, not keywords (with optional file/language filters like `*.go` and `codeOnly=true` for code-focused results). |
 | **`find_files`** | Find files by glob or substring, scoped to the index. |
 | **`get_symbols`** | Look up function/class/type definitions by name, kind, or file. |
 | **`get_file_summary`** | Quick structural overview of a file (chunks, symbols) without reading it. |
 | **`get_recent_changes`** | Summarize recent git commits and changed files, optionally filtered by topic. |
 | **`get_dependencies`** | Extract import dependencies for a file or directory (TS/JS/Go/Python/Rust/Kotlin). |
 | **`find_importers`** | Reverse dependency lookup — which files import a given target. |
-| **`find_references`** | Find symbol usages/call-sites (Go via gopls, TS/JS via compiler API). |
+| **`find_references`** | Find symbol usages/call-sites (Go via gopls, TS/JS via compiler API), with nearby symbol suggestions for stale names and optional call-site context snippets. |
 | **`execute`** | Batch multiple queries in one round trip via a TypeScript call plan. |
 | **`status`** | Engine health, indexing state, coverage stats, and capability flags. |
+
+> API naming convention: prefer **camelCase** parameters (e.g. `minScore`, `filePattern`, `codeOnly`). Snake_case aliases are kept for backward compatibility.
 
 ---
 
@@ -384,7 +386,7 @@ This is a work in progress. Some things on the radar:
 - [ ] npm package for easier installation (`npx context-engine serve`)
 - [ ] More languages for AST chunking (Java, C#, Ruby, ...)
 - [ ] Smarter reranking (cross-encoder, LLM-based)
-- [ ] Multi-repo support
+- [ ] Multi-repo support (index multiple repos in a single instance so agents can search across them in one query — useful when your system spans several tightly-coupled repos)
 - [ ] Project-level summaries and architecture maps
 - [ ] Pre-built binaries (no Bun dependency)
 

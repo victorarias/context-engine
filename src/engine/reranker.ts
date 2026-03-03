@@ -26,12 +26,14 @@ export function rerankCandidates(
 
     const pathBoost = tokenCoverage(queryTokens, tokenize(candidate.path)) * 0.1;
     const recencyBoost = computeRecencyBoost(candidate.path, options.roots);
+    const contentPenalty = computeContentPenalty(candidate);
 
     const score =
       candidate.baseScore * 0.75 +
       symbolBoost +
       pathBoost +
-      recencyBoost;
+      recencyBoost +
+      contentPenalty;
 
     return {
       ...candidate,
@@ -61,6 +63,32 @@ function computeRecencyBoost(path: string, roots: string[]): number {
   }
 
   return 0;
+}
+
+function computeContentPenalty(candidate: RankedCandidate): number {
+  const language = candidate.chunk.language.toLowerCase();
+  const normalizedPath = candidate.path.toLowerCase();
+
+  let penalty = 0;
+
+  if (language === "markdown" || language === "text") {
+    penalty -= 0.04;
+
+    const lineSpan = Math.max(1, candidate.chunk.endLine - candidate.chunk.startLine + 1);
+    if (lineSpan >= 80) {
+      penalty -= 0.08;
+    } else if (lineSpan >= 60) {
+      penalty -= 0.05;
+    } else if (lineSpan >= 40) {
+      penalty -= 0.03;
+    }
+  }
+
+  if (normalizedPath.includes("codex-transcript") || normalizedPath.includes("transcript")) {
+    penalty -= 0.1;
+  }
+
+  return penalty;
 }
 
 function tokenize(value: string): string[] {

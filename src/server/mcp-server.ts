@@ -148,6 +148,10 @@ function optionalNumber(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) ? value : undefined;
 }
 
+function optionalBoolean(value: unknown): boolean | undefined {
+  return typeof value === "boolean" ? value : undefined;
+}
+
 function optionalAliasNumber(args: Record<string, unknown>, camel: string, snake: string): number | undefined {
   const camelValue = optionalNumber(args[camel]);
   if (camelValue !== undefined) return camelValue;
@@ -175,7 +179,14 @@ function formatSearchResults(results: Awaited<ReturnType<Engine["search"]>>): st
       const header = `### ${i + 1}. ${r.filePath}:${r.startLine}-${r.endLine}` +
         (r.symbolName ? ` (${r.symbolKind}: ${r.symbolName})` : "") +
         ` [score: ${r.score.toFixed(3)}]`;
-      return `${header}\n\`\`\`${r.language}\n${r.content}\n\`\`\``;
+
+      const lines = r.content.split(/\r?\n/);
+      const maxLines = 48;
+      const clipped = lines.length > maxLines
+        ? `${lines.slice(0, maxLines).join("\n")}\n... (${lines.length - maxLines} more lines omitted)`
+        : r.content;
+
+      return `${header}\n\`\`\`${r.language}\n${clipped}\n\`\`\``;
     }),
   ].join("\n\n");
 }
@@ -250,7 +261,20 @@ async function executeScriptedCall(engine: Engine, call: ScriptedToolCall): Prom
       const limit = optionalNumber(call.args.limit);
       const minScore = optionalAliasNumber(call.args, "minScore", "min_score");
       const worktreeId = optionalString(call.args.worktreeId);
-      const results = await engine.search(query, { limit, minScore, worktreeId });
+      const filePattern = optionalString(call.args.filePattern) ?? optionalString(call.args.file_pattern);
+      const excludePattern = optionalString(call.args.excludePattern) ?? optionalString(call.args.exclude_pattern);
+      const language = optionalString(call.args.language);
+      const codeOnly = optionalBoolean(call.args.codeOnly) ?? optionalBoolean(call.args.code_only);
+
+      const results = await engine.search(query, {
+        limit,
+        minScore,
+        worktreeId,
+        filePattern,
+        excludePattern,
+        language,
+        codeOnly,
+      });
       return formatSearchResults(results);
     }
 
@@ -310,6 +334,8 @@ async function executeScriptedCall(engine: Engine, call: ScriptedToolCall): Prom
       return engine.findReferences(symbol, {
         filePath: optionalString(call.args.filePath),
         includeDeclaration: call.args.includeDeclaration === true,
+        includeContext: call.args.includeContext === true,
+        contextLines: optionalNumber(call.args.contextLines),
         limit: optionalNumber(call.args.limit),
       });
     }
@@ -347,22 +373,38 @@ export function createMcpServer(engine: Engine): McpServer {
   server.registerTool("semantic_search", {
     description:
       "What: Natural-language concept search over indexed chunks (symbol-sized chunks for AST languages, " +
-      "~80-line windows with overlap otherwise). " +
+      "sliding-window chunks otherwise). " +
       "Use when: you know behavior/intent but not exact identifiers. " +
       "Prefer over: grep for exploratory discovery. " +
+      "Supports optional file/language filters and a codeOnly mode for code-focused narrowing. " +
       "Not for: exact literal matches or usage counting. Scores are relative ranking signals per query.",
     inputSchema: {
       query: z.string().describe("Natural language query (e.g. 'how auth tokens are refreshed')"),
       limit: z.number().optional().default(10).describe("Max results to return"),
       minScore: z.number().optional().describe("Optional minimum score filter (heuristic threshold; compare scores only within the same query)."),
-      min_score: z.number().optional().describe("Alias for minScore."),
+      min_score: z.number().optional().describe("Deprecated alias for minScore (prefer camelCase)."),
+      filePattern: z.string().optional().describe("Optional glob/substring include filter on file paths (e.g. '*.go', 'src/auth')."),
+      file_pattern: z.string().optional().describe("Deprecated alias for filePattern (prefer camelCase)."),
+      excludePattern: z.string().optional().describe("Optional glob/substring exclude filter on file paths."),
+      exclude_pattern: z.string().optional().describe("Deprecated alias for excludePattern (prefer camelCase)."),
+      language: z.string().optional().describe("Optional language filter (e.g. 'go', 'typescript', 'markdown')."),
+      codeOnly: z.boolean().optional().describe("If true, keep code-like files and drop docs/transcripts/noise by default."),
+      code_only: z.boolean().optional().describe("Deprecated alias for codeOnly (prefer camelCase)."),
       worktreeId: z.string().optional().describe("Scope search to a specific worktree"),
     },
   }, async (args) => withToolLogging("semantic_search", args, async () => {
     const minScore = args.minScore ?? args.min_score;
+    const filePattern = args.filePattern ?? args.file_pattern;
+    const excludePattern = args.excludePattern ?? args.exclude_pattern;
+    const codeOnly = args.codeOnly ?? args.code_only;
+
     const results = await engine.search(args.query, {
       limit: args.limit,
       minScore,
+      filePattern,
+      excludePattern,
+      language: args.language,
+      codeOnly,
       worktreeId: args.worktreeId,
     });
 
@@ -470,7 +512,7 @@ export function createMcpServer(engine: Engine): McpServer {
   server.registerTool("get_dependencies", {
     description:
       "What: Extract direct import dependencies for a file (or all files in a directory). " +
-      "Uses TS compiler-aware graph for TS/JS and static parsing for Go/Python/Rust/Kotlin. " +
+      "Uses TS compiler-aware graph for TS/JS and static parsing for Go/Python/Rust/Kotlin, with internal vs external grouping hints. " +
       "Use when: scoping refactor impact quickly. " +
       "Prefer over: manual import scanning. " +
       "Not for: full transitive graph analysis.",
@@ -514,17 +556,21 @@ export function createMcpServer(engine: Engine): McpServer {
       "What: Find symbol usages/call-sites. " +
       "Use when: assessing refactor impact or tracing where an API is used. " +
       "Prefer over: grep for semantics-aware references (Go via gopls, TS/JS via compiler API, heuristic fallback when unresolved). " +
-      "Not for: declaration lookup (use get_symbols). For common/ambiguous symbols, pass `filePath` to the declaration for high precision.",
+      "Not for: declaration lookup (use get_symbols). For common names, pass `filePath` so the engine knows exactly which symbol definition you mean.",
     inputSchema: {
-      symbol: z.string().describe("Symbol name to find references for (e.g. 'Start', 'NewClient')"),
-      filePath: z.string().optional().describe("Declaration anchor path (strongly recommended for common symbols; enables precise backend resolution)."),
+      symbol: z.string().describe("Symbol name to find references for (e.g. 'Start', 'NewClient')."),
+      filePath: z.string().optional().describe("Path to the file that defines the symbol. Helps disambiguate common names."),
       includeDeclaration: z.boolean().optional().default(false).describe("Include declaration location when backend supports it."),
+      includeContext: z.boolean().optional().default(false).describe("Include surrounding source lines around each reference."),
+      contextLines: z.number().optional().default(2).describe("Number of lines before/after each reference when includeContext=true."),
       limit: z.number().optional().default(50).describe("Maximum references to return."),
     },
   }, async (args) => withToolLogging("find_references", args, async () => {
     const text = await engine.findReferences(args.symbol, {
       filePath: args.filePath,
       includeDeclaration: args.includeDeclaration,
+      includeContext: args.includeContext,
+      contextLines: args.contextLines,
       limit: args.limit,
     });
     return { content: [{ type: "text", text }] };
@@ -534,14 +580,15 @@ export function createMcpServer(engine: Engine): McpServer {
 
   server.registerTool("execute", {
     description:
-      "What: Batch multiple context-engine tool calls in one round trip using a TypeScript snippet. " +
+      "What: Sandbox-run a TypeScript call plan that can invoke only context-engine tools (no filesystem/network/process access). " +
       "Use when: a task needs fan-out lookups or repeatable analysis workflows. " +
       "Prefer over: many sequential tool calls. " +
-      "Not for: arbitrary host scripting or side effects (no filesystem/network/process access).",
+      "Not for: arbitrary host scripting or side effects.",
     inputSchema: {
       code: z.string().describe(
         "TypeScript snippet must assign `output` to either an array of calls or { calls: [...] }. " +
-        "Each call is { tool, args }. Example: output = [{ tool: 'find_files', args: { pattern: '*.ts' } }, { tool: 'find_references', args: { symbol: 'Start', filePath: 'src/main.ts' } }]. " +
+        "Each call is { tool, args }. Example: output = [{ tool: 'find_files', args: { pattern: '*.ts' } }, { tool: 'find_references', args: { symbol: 'Start', filePath: 'src/main.ts', includeContext: true } }]. " +
+        "`input` is available as a read-only variable (example: output = [{ tool: 'semantic_search', args: { query: input.topic, codeOnly: true } }]). " +
         "Allowed tools: semantic_search, find_files, get_symbols, get_file_summary, get_recent_changes, get_dependencies, find_importers, find_references, status.",
       ),
       input: z.unknown().optional().describe("Read-only input object available as `input` in sandbox."),

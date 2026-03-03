@@ -106,7 +106,18 @@ export class ContextEngine implements Engine {
     return engine;
   }
 
-  async search(query: string, options?: { worktreeId?: string; limit?: number; minScore?: number }): Promise<SearchResult[]> {
+  async search(
+    query: string,
+    options?: {
+      worktreeId?: string;
+      limit?: number;
+      minScore?: number;
+      filePattern?: string;
+      excludePattern?: string;
+      language?: string;
+      codeOnly?: boolean;
+    },
+  ): Promise<SearchResult[]> {
     if (!query.trim()) return [];
 
     const startedAt = Date.now();
@@ -116,6 +127,10 @@ export class ContextEngine implements Engine {
       worktreeId,
       limit: options?.limit ?? 10,
       minScore: options?.minScore,
+      filePattern: options?.filePattern,
+      excludePattern: options?.excludePattern,
+      language: options?.language,
+      codeOnly: options?.codeOnly === true,
     });
     const [queryVector] = await this.embedder.embedWithPriority([query], 0);
     const limit = Math.max(1, options?.limit ?? 10);
@@ -173,6 +188,10 @@ export class ContextEngine implements Engine {
     const minScore = Number.isFinite(options?.minScore)
       ? Math.max(0, Math.min(10, Number(options?.minScore)))
       : undefined;
+    const filePattern = options?.filePattern?.trim() || undefined;
+    const excludePattern = options?.excludePattern?.trim() || undefined;
+    const languageFilter = options?.language?.trim().toLowerCase() || undefined;
+    const codeOnly = options?.codeOnly === true;
 
     const reranked = rerankCandidates(
       query,
@@ -184,9 +203,29 @@ export class ContextEngine implements Engine {
       { roots: this.indexedRoots },
     );
 
-    const filtered = minScore === undefined
-      ? reranked
-      : reranked.filter((candidate) => candidate.score >= minScore);
+    const filtered = reranked.filter((candidate) => {
+      if (minScore !== undefined && candidate.score < minScore) {
+        return false;
+      }
+
+      if (filePattern && !matchesPattern(candidate.path, filePattern)) {
+        return false;
+      }
+
+      if (excludePattern && matchesPattern(candidate.path, excludePattern)) {
+        return false;
+      }
+
+      if (languageFilter && candidate.chunk.language.toLowerCase() !== languageFilter) {
+        return false;
+      }
+
+      if (codeOnly && !isCodeSearchCandidate(candidate.path, candidate.chunk.language)) {
+        return false;
+      }
+
+      return true;
+    });
 
     const byChunkId = new Map(candidates.map((candidate) => [candidate.result.chunkId, candidate.result]));
 
@@ -216,6 +255,10 @@ export class ContextEngine implements Engine {
       worktreeId,
       vectorCandidates: vectorResults.length,
       minScore,
+      filePattern,
+      excludePattern,
+      language: languageFilter,
+      codeOnly,
       returned: results.length,
       durationMs: Date.now() - startedAt,
     });
@@ -430,9 +473,21 @@ export class ContextEngine implements Engine {
           return `No TypeScript/JavaScript dependencies found in ${filePath}`;
         }
 
+        const grouped = formatDependencyGroups(
+          tsEdges
+            .map((edge) => edge.resolvedTarget ?? edge.rawSpecifier)
+            .filter((value): value is string => !!value),
+          {
+            sourceFilePath: resolved,
+            language: inferLanguageFromPath(resolved),
+            indexedRoots: this.indexedRoots,
+          },
+        );
+
         return [
           `Dependencies for ${filePath} (ts-semantic):`,
           ...formatTsEdges(tsEdges),
+          ...grouped,
         ].join("\n");
       }
 
@@ -446,6 +501,11 @@ export class ContextEngine implements Engine {
       return [
         `Dependencies for ${filePath}:`,
         ...deps.map((d) => `- ${d}`),
+        ...formatDependencyGroups(deps, {
+          sourceFilePath: resolved,
+          language: inferLanguageFromPath(resolved),
+          indexedRoots: this.indexedRoots,
+        }),
       ].join("\n");
     } finally {
       this.recordQueryLatency("get_dependencies", Date.now() - startedAt);
@@ -782,7 +842,13 @@ export class ContextEngine implements Engine {
 
   async findReferences(
     symbol: string,
-    options?: { filePath?: string; includeDeclaration?: boolean; limit?: number },
+    options?: {
+      filePath?: string;
+      includeDeclaration?: boolean;
+      includeContext?: boolean;
+      contextLines?: number;
+      limit?: number;
+    },
   ): Promise<string> {
     const startedAt = Date.now();
 
@@ -794,17 +860,32 @@ export class ContextEngine implements Engine {
         return "Missing symbol for reference search.";
       }
 
-    const limit = Math.max(1, options?.limit ?? 50);
-    const includeDeclaration = options?.includeDeclaration ?? false;
-    const normalizedFilePath = options?.filePath ? normalizeFilePath(options.filePath) : undefined;
+      const limit = Math.max(1, options?.limit ?? 50);
+      const includeDeclaration = options?.includeDeclaration ?? false;
+      const includeContext = options?.includeContext ?? false;
+      const contextLines = Math.max(0, Math.min(8, Math.floor(options?.contextLines ?? 2)));
+      const normalizedFilePath = options?.filePath ? normalizeFilePath(options.filePath) : undefined;
 
-    const explicitGo = normalizedFilePath?.endsWith(".go") === true;
-    const explicitTs = normalizedFilePath ? isTsLikePath(normalizedFilePath) : false;
+      const explicitGo = normalizedFilePath?.endsWith(".go") === true;
+      const explicitTs = normalizedFilePath ? isTsLikePath(normalizedFilePath) : false;
+      const response = (params: {
+        symbol: string;
+        requestedBackend: "gopls" | "tsserver" | "heuristic";
+        actualBackend: "gopls" | "tsserver" | "heuristic" | "none";
+        references: string[];
+        fallbackReason?: string;
+        candidates?: string[];
+        guidance?: string;
+      }) => this.formatFindReferencesResponse({
+        ...params,
+        includeContext,
+        contextLines,
+      });
 
-    if (explicitTs) {
+      if (explicitTs) {
       if (!this.resolveFileOnDisk(normalizedFilePath!)) {
         const suggestion = await this.buildDependencyPathSuggestion(normalizedFilePath);
-        return this.formatFindReferencesResponse({
+        return response({
           symbol: query,
           requestedBackend: "tsserver",
           actualBackend: "none",
@@ -826,7 +907,7 @@ export class ContextEngine implements Engine {
           limit,
         });
 
-        return this.formatFindReferencesResponse({
+        return response({
           symbol: query,
           requestedBackend: "tsserver",
           actualBackend: "heuristic",
@@ -838,7 +919,7 @@ export class ContextEngine implements Engine {
       }
 
       if (tsResult.resolution.kind === "resolved" && tsResult.references.length > 0) {
-        return this.formatFindReferencesResponse({
+        return response({
           symbol: query,
           requestedBackend: "tsserver",
           actualBackend: "tsserver",
@@ -853,7 +934,7 @@ export class ContextEngine implements Engine {
           limit,
         });
 
-        return this.formatFindReferencesResponse({
+        return response({
           symbol: query,
           requestedBackend: "tsserver",
           actualBackend: "heuristic",
@@ -869,7 +950,7 @@ export class ContextEngine implements Engine {
         limit,
       });
 
-      return this.formatFindReferencesResponse({
+      return response({
         symbol: query,
         requestedBackend: "tsserver",
         actualBackend: "heuristic",
@@ -890,7 +971,7 @@ export class ContextEngine implements Engine {
           limit,
         });
 
-        return this.formatFindReferencesResponse({
+        return response({
           symbol: query,
           requestedBackend: "gopls",
           actualBackend: "heuristic",
@@ -909,7 +990,7 @@ export class ContextEngine implements Engine {
           });
 
           if (references.length > 0) {
-            return this.formatFindReferencesResponse({
+            return response({
               symbol: query,
               requestedBackend: "gopls",
               actualBackend: "gopls",
@@ -923,7 +1004,7 @@ export class ContextEngine implements Engine {
             limit,
           });
 
-          return this.formatFindReferencesResponse({
+          return response({
             symbol: query,
             requestedBackend: "gopls",
             actualBackend: "heuristic",
@@ -937,7 +1018,7 @@ export class ContextEngine implements Engine {
             limit,
           });
 
-          return this.formatFindReferencesResponse({
+          return response({
             symbol: query,
             requestedBackend: "gopls",
             actualBackend: "heuristic",
@@ -953,7 +1034,7 @@ export class ContextEngine implements Engine {
         limit,
       });
 
-      return this.formatFindReferencesResponse({
+      return response({
         symbol: query,
         requestedBackend: "gopls",
         actualBackend: "heuristic",
@@ -975,7 +1056,7 @@ export class ContextEngine implements Engine {
         limit,
       });
 
-      return this.formatFindReferencesResponse({
+      return response({
         symbol: query,
         requestedBackend: "tsserver",
         actualBackend: "heuristic",
@@ -988,7 +1069,7 @@ export class ContextEngine implements Engine {
 
     if (tsResult.resolution.kind === "resolved") {
       if (tsResult.references.length > 0) {
-        return this.formatFindReferencesResponse({
+        return response({
           symbol: query,
           requestedBackend: "tsserver",
           actualBackend: "tsserver",
@@ -1002,7 +1083,7 @@ export class ContextEngine implements Engine {
         limit,
       });
 
-      return this.formatFindReferencesResponse({
+      return response({
         symbol: query,
         requestedBackend: "tsserver",
         actualBackend: "heuristic",
@@ -1017,7 +1098,7 @@ export class ContextEngine implements Engine {
       limit,
     });
 
-    return this.formatFindReferencesResponse({
+    return response({
       symbol: query,
       requestedBackend: "heuristic",
       actualBackend: "heuristic",
@@ -1040,6 +1121,8 @@ export class ContextEngine implements Engine {
     fallbackReason?: string;
     candidates?: string[];
     guidance?: string;
+    includeContext?: boolean;
+    contextLines?: number;
   }): string {
     const lines = [
       `References for ${params.symbol}:`,
@@ -1058,6 +1141,10 @@ export class ContextEngine implements Engine {
       }
     }
 
+    const renderedReferences = params.includeContext
+      ? this.renderReferencesWithContext(params.references, params.contextLines ?? 2)
+      : params.references;
+
     if (params.references.length === 0) {
       if (params.actualBackend === "none") {
         lines.push("No call-site search executed.");
@@ -1065,10 +1152,15 @@ export class ContextEngine implements Engine {
         lines.push("No references found.");
       }
     } else {
-      lines.push("References:");
-      for (const ref of params.references) {
+      lines.push(params.includeContext ? "References (with context):" : "References:");
+      for (const ref of renderedReferences) {
         lines.push(`- ${ref}`);
       }
+    }
+
+    const candidateNames = extractCandidateNames(params.candidates ?? []).slice(0, 5);
+    if (params.references.length === 0 && candidateNames.length > 0) {
+      lines.push(`Did you mean: ${candidateNames.join(", ")}?`);
     }
 
     if (params.actualBackend === "heuristic") {
@@ -1078,13 +1170,50 @@ export class ContextEngine implements Engine {
     if (params.guidance) {
       lines.push(`Guidance: ${params.guidance}`);
     } else if (params.references.length === 0 && params.candidates && params.candidates.length > 0) {
-      const firstCandidate = params.candidates[0]?.split(":")?.[0];
-      if (firstCandidate) {
-        lines.push(`Guidance: Retry with filePath='${firstCandidate}' to disambiguate.`);
+      const parsed = parseCandidateDeclaration(params.candidates[0]);
+      if (parsed?.filePath && candidateNames[0]) {
+        lines.push(`Guidance: Retry with filePath='${parsed.filePath}' and symbol='${candidateNames[0]}'.`);
+      } else if (parsed?.filePath) {
+        lines.push(`Guidance: Retry with filePath='${parsed.filePath}' to disambiguate.`);
       }
     }
 
     return lines.join("\n");
+  }
+
+  private renderReferencesWithContext(references: string[], contextLines: number): string[] {
+    const radius = Math.max(0, Math.min(8, Math.floor(contextLines)));
+
+    return references.map((ref) => {
+      const parsed = parseReferenceLocation(ref);
+      if (!parsed || radius <= 0) {
+        return ref;
+      }
+
+      const absolutePath = this.resolveFileOnDisk(parsed.filePath) ?? parsed.filePath;
+      if (!existsSync(absolutePath)) {
+        return ref;
+      }
+
+      try {
+        const content = readFileSync(absolutePath, "utf-8");
+        const lines = content.split(/\r?\n/);
+
+        const startLine = Math.max(1, parsed.line - radius);
+        const endLine = Math.min(lines.length, parsed.line + radius);
+        const context: string[] = [];
+
+        for (let lineNo = startLine; lineNo <= endLine; lineNo++) {
+          const sourceLine = lines[lineNo - 1] ?? "";
+          const marker = lineNo === parsed.line ? ">" : " ";
+          context.push(`${marker} ${lineNo}: ${sourceLine}`);
+        }
+
+        return `${ref}\n${context.join("\n")}`;
+      } catch {
+        return ref;
+      }
+    });
   }
 
   async searchDocs(query: string): Promise<SearchResult[]> {
@@ -1677,10 +1806,15 @@ export class ContextEngine implements Engine {
 
       const location = findSymbolPositionInFile(absolutePath, symbol);
       if (!location) {
+        const nearbyCandidates = await this.getNearbySymbolCandidates(normalized, symbol, { limit: 8 });
+        const nearbyNames = extractCandidateNames(nearbyCandidates).slice(0, 4);
+
         return {
           kind: "unresolved",
-          reason: `symbol '${symbol}' was not found in ${filePath}`,
-          candidates: [],
+          reason: nearbyNames.length > 0
+            ? `symbol '${symbol}' was not found in ${normalized}. Did you mean: ${nearbyNames.join(", ")}?`
+            : `symbol '${symbol}' was not found in ${normalized}`,
+          candidates: nearbyCandidates,
         };
       }
 
@@ -1761,6 +1895,51 @@ export class ContextEngine implements Engine {
       },
       candidates,
     };
+  }
+
+  private async getNearbySymbolCandidates(
+    normalizedFilePath: string,
+    symbol: string,
+    options: { limit: number },
+  ): Promise<string[]> {
+    let symbols = await this.metadataStore.getSymbols({
+      filePath: normalizedFilePath,
+      repoId: this.repoId,
+      limit: 200,
+    });
+
+    if (symbols.length === 0) {
+      const absolutePath = this.resolveFileOnDisk(normalizedFilePath);
+      if (absolutePath && existsSync(absolutePath)) {
+        try {
+          const content = readFileSync(absolutePath, "utf-8");
+          symbols = extractSymbols(content, normalizedFilePath, this.repoId);
+        } catch {
+          symbols = [];
+        }
+      }
+    }
+
+    if (symbols.length === 0) {
+      return [];
+    }
+
+    const targetExt = extname(normalizedFilePath).toLowerCase();
+    const filtered = symbols
+      .filter((entry) => !targetExt || extname(entry.filePath).toLowerCase() === targetExt)
+      .map((entry) => ({
+        ...entry,
+        suggestionScore: scoreSymbolSuggestion(symbol, entry.name),
+      }))
+      .sort((a, b) => b.suggestionScore - a.suggestionScore || a.startLine - b.startLine);
+
+    const best = filtered.filter((entry) => entry.suggestionScore > 0).slice(0, options.limit);
+    const fallback = filtered.slice(0, Math.min(options.limit, 5));
+
+    const candidates = (best.length > 0 ? best : fallback)
+      .map((entry) => `${entry.filePath}:${entry.startLine} ${entry.kind} ${entry.name}`);
+
+    return Array.from(new Set(candidates));
   }
 
   private findGoReferencesWithGopls(
@@ -1922,6 +2101,173 @@ function formatTsEdges(edges: TsDependencyEdge[]): string[] {
   }
 
   return lines;
+}
+
+function formatDependencyGroups(
+  dependencies: string[],
+  context?: { sourceFilePath?: string; language?: string; indexedRoots?: string[] },
+): string[] {
+  if (dependencies.length === 0) {
+    return [];
+  }
+
+  const language = (context?.language ?? "").toLowerCase();
+  if (language === "go") {
+    return formatGoDependencyGroups(dependencies, {
+      sourceFilePath: context?.sourceFilePath,
+      indexedRoots: context?.indexedRoots,
+    });
+  }
+
+  const internal: string[] = [];
+  const external: string[] = [];
+
+  for (const dependency of dependencies) {
+    const kind = classifyDependencyKind(dependency);
+    if (kind === "internal") {
+      internal.push(dependency);
+    } else {
+      external.push(dependency);
+    }
+  }
+
+  return [
+    "Dependency groups (heuristic):",
+    renderDependencyGroupLine("Internal", internal),
+    renderDependencyGroupLine("External", external),
+  ];
+}
+
+function formatGoDependencyGroups(
+  dependencies: string[],
+  context?: { sourceFilePath?: string; indexedRoots?: string[] },
+): string[] {
+  const modulePaths = resolveGoModulePathsForFile(context?.sourceFilePath, context?.indexedRoots ?? []);
+
+  const internal: string[] = [];
+  const stdlib: string[] = [];
+  const external: string[] = [];
+
+  for (const dependency of dependencies) {
+    const kind = classifyGoDependencyKind(dependency, modulePaths);
+    if (kind === "internal") {
+      internal.push(dependency);
+    } else if (kind === "stdlib") {
+      stdlib.push(dependency);
+    } else {
+      external.push(dependency);
+    }
+  }
+
+  return [
+    "Dependency groups (heuristic):",
+    renderDependencyGroupLine("Internal", internal),
+    renderDependencyGroupLine("Stdlib", stdlib),
+    renderDependencyGroupLine("External", external),
+  ];
+}
+
+function renderDependencyGroupLine(label: string, entries: string[]): string {
+  if (entries.length === 0) {
+    return `- ${label} (0)`;
+  }
+
+  const unique = Array.from(new Set(entries));
+  return `- ${label} (${unique.length}): ${unique.slice(0, 12).join(", ")}${unique.length > 12 ? " ..." : ""}`;
+}
+
+function resolveGoModulePathsForFile(sourceFilePath: string | undefined, indexedRoots: string[]): string[] {
+  const modulePaths = new Set<string>();
+
+  const addModulePathFromDir = (dirPath: string | undefined): void => {
+    if (!dirPath) return;
+    const moduleDir = findNearestGoModuleDir(dirPath);
+    if (!moduleDir) return;
+
+    const modulePath = parseGoModulePath(resolve(moduleDir, "go.mod"));
+    if (modulePath) {
+      modulePaths.add(modulePath);
+    }
+  };
+
+  addModulePathFromDir(sourceFilePath);
+  for (const root of indexedRoots) {
+    addModulePathFromDir(root);
+  }
+
+  return Array.from(modulePaths);
+}
+
+function classifyGoDependencyKind(
+  dependency: string,
+  modulePaths: string[],
+): "internal" | "stdlib" | "external" {
+  const value = dependency.replace(/^pkg:/, "").trim();
+  if (!value) return "external";
+
+  if (
+    value.startsWith("./") ||
+    value.startsWith("../") ||
+    value.startsWith("/")
+  ) {
+    return "internal";
+  }
+
+  if (modulePaths.some((modulePath) => value === modulePath || value.startsWith(`${modulePath}/`))) {
+    return "internal";
+  }
+
+  const head = value.split("/")[0] ?? "";
+  if (head && !head.includes(".")) {
+    return "stdlib";
+  }
+
+  return "external";
+}
+
+function classifyDependencyKind(dependency: string): "internal" | "external" {
+  const value = dependency.replace(/^pkg:/, "").trim();
+  if (!value) return "external";
+
+  const normalized = normalizeFilePath(value);
+
+  if (
+    normalized.includes("/node_modules/") ||
+    normalized.startsWith("node_modules/") ||
+    normalized.includes("/.pnpm/") ||
+    normalized.startsWith("@")
+  ) {
+    return "external";
+  }
+
+  if (
+    normalized.startsWith("./") ||
+    normalized.startsWith("../") ||
+    normalized.startsWith("/") ||
+    normalized.startsWith("src/") ||
+    normalized.startsWith("app/") ||
+    normalized.startsWith("lib/") ||
+    normalized.startsWith("internal/") ||
+    normalized.startsWith("cmd/")
+  ) {
+    return "internal";
+  }
+
+  const extension = extname(normalized).toLowerCase();
+  if (CODE_SEARCH_EXTENSIONS.has(extension)) {
+    return "internal";
+  }
+
+  if (!normalized.includes("/")) {
+    return "external";
+  }
+
+  const head = normalized.split("/")[0] ?? "";
+  if (head.includes(".")) {
+    return "external";
+  }
+
+  return "internal";
 }
 
 function stripCodeExtension(path: string): string {
@@ -2316,6 +2662,77 @@ function isLikelyDeclarationLine(line: string, symbol: string, symbolKind: strin
   return new RegExp(`\\b${escaped}\\b`).test(line);
 }
 
+const CODE_SEARCH_LANGUAGES = new Set([
+  "typescript",
+  "javascript",
+  "python",
+  "go",
+  "rust",
+  "kotlin",
+  "java",
+  "c",
+  "cpp",
+  "csharp",
+  "swift",
+  "scala",
+]);
+
+const CODE_SEARCH_EXTENSIONS = new Set([
+  ".ts",
+  ".tsx",
+  ".mts",
+  ".cts",
+  ".js",
+  ".jsx",
+  ".mjs",
+  ".cjs",
+  ".py",
+  ".go",
+  ".rs",
+  ".kt",
+  ".kts",
+  ".java",
+  ".c",
+  ".cc",
+  ".cpp",
+  ".cxx",
+  ".h",
+  ".hpp",
+  ".cs",
+  ".swift",
+  ".scala",
+]);
+
+function isCodeSearchCandidate(filePath: string, language: string): boolean {
+  const normalizedLanguage = language.toLowerCase();
+  const normalizedPath = filePath.toLowerCase();
+  const extension = extname(normalizedPath);
+
+  if (CODE_SEARCH_LANGUAGES.has(normalizedLanguage)) {
+    return true;
+  }
+
+  if (CODE_SEARCH_EXTENSIONS.has(extension)) {
+    return true;
+  }
+
+  if (
+    normalizedLanguage === "markdown" ||
+    normalizedLanguage === "text" ||
+    normalizedLanguage === "json" ||
+    normalizedPath.endsWith(".md") ||
+    normalizedPath.endsWith(".rst") ||
+    normalizedPath.endsWith(".txt") ||
+    normalizedPath.includes("/docs/") ||
+    normalizedPath.startsWith("docs/") ||
+    normalizedPath.includes("transcript")
+  ) {
+    return false;
+  }
+
+  return false;
+}
+
 function inferLanguageFromPath(path: string): string {
   switch (extname(path).toLowerCase()) {
     case ".ts":
@@ -2361,6 +2778,106 @@ function isGoplsAvailable(): boolean {
   }
 
   return GOPLS_AVAILABLE_CACHE;
+}
+
+function parseReferenceLocation(reference: string): { filePath: string; line: number } | null {
+  const match = reference.match(/^(.*?):(\d+):/);
+  if (!match) return null;
+
+  return {
+    filePath: normalizeFilePath(match[1]),
+    line: Number(match[2]),
+  };
+}
+
+function parseCandidateDeclaration(candidate: string): { filePath: string; line?: number; kind?: string; name?: string } | null {
+  const trimmed = candidate.trim();
+  if (!trimmed) return null;
+
+  const full = trimmed.match(/^(.*?):(\d+)\s+([a-zA-Z_]+)\s+(.+)$/);
+  if (full) {
+    return {
+      filePath: normalizeFilePath(full[1]),
+      line: Number(full[2]),
+      kind: full[3],
+      name: full[4].trim(),
+    };
+  }
+
+  const pathOnly = trimmed.match(/^(.*?):(\d+)/);
+  if (pathOnly) {
+    return {
+      filePath: normalizeFilePath(pathOnly[1]),
+      line: Number(pathOnly[2]),
+    };
+  }
+
+  return null;
+}
+
+function extractCandidateNames(candidates: string[]): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+
+  for (const candidate of candidates) {
+    const parsed = parseCandidateDeclaration(candidate);
+    const name = parsed?.name?.trim();
+    if (!name) continue;
+
+    if (!seen.has(name)) {
+      seen.add(name);
+      out.push(name);
+    }
+  }
+
+  return out;
+}
+
+function scoreSymbolSuggestion(query: string, candidate: string): number {
+  const q = query.trim().toLowerCase();
+  const c = candidate.trim().toLowerCase();
+  if (!q || !c) return 0;
+
+  if (q === c) return 1;
+  if (c.startsWith(q)) return 0.95;
+  if (c.includes(q)) return 0.85;
+  if (q.includes(c)) return 0.7;
+
+  const prefix = commonPrefixLength(q, c);
+  const prefixScore = prefix / Math.max(q.length, c.length);
+  const overlapScore = identifierTokenOverlap(q, c);
+
+  return Math.max(prefixScore * 0.65, overlapScore * 0.75);
+}
+
+function commonPrefixLength(a: string, b: string): number {
+  const max = Math.min(a.length, b.length);
+  let i = 0;
+  while (i < max && a[i] === b[i]) i += 1;
+  return i;
+}
+
+function identifierTokenOverlap(left: string, right: string): number {
+  const leftTokens = tokenizeIdentifier(left);
+  const rightTokens = tokenizeIdentifier(right);
+  if (leftTokens.length === 0 || rightTokens.length === 0) return 0;
+
+  const rightSet = new Set(rightTokens);
+  let matched = 0;
+  for (const token of leftTokens) {
+    if (rightSet.has(token)) matched += 1;
+  }
+
+  return matched / leftTokens.length;
+}
+
+function tokenizeIdentifier(value: string): string[] {
+  return value
+    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+    .toLowerCase()
+    .split(/[^a-z0-9]+/g)
+    .map((token) => token.trim())
+    .filter(Boolean);
 }
 
 function escapeRegExp(value: string): string {

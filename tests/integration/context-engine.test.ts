@@ -72,6 +72,108 @@ describe("ContextEngine", () => {
     await engine.close();
   });
 
+  it("supports semantic_search language/path filters to avoid noisy docs", async () => {
+    const tmp = TempDir.create("ce-engine-search-filters");
+    dirs.push(tmp);
+
+    const sourceDir = join(tmp.path, "repo", "src");
+    mkdirSync(join(sourceDir, "server", "conversation"), { recursive: true });
+    mkdirSync(join(sourceDir, "docs", "codex-transcripts"), { recursive: true });
+
+    writeFileSync(
+      join(sourceDir, "server", "conversation", "service.go"),
+      `package conversation
+
+func SendMessageV2(userID string, text string) string {
+  return userID + ":" + text
+}
+`,
+    );
+
+    writeFileSync(
+      join(sourceDir, "docs", "codex-transcripts", "session.md"),
+      `# Transcript
+
+This transcript repeatedly discusses SendMessageV2 behavior and rollout notes.
+`,
+    );
+
+    const config = ConfigSchema.parse({
+      sources: [{ path: sourceDir }],
+      dataDir: join(tmp.path, "data"),
+      embedding: {
+        provider: "local",
+        localBackend: "mock",
+        dimensions: 768,
+      },
+    });
+
+    const engine = await ContextEngine.create(config);
+    await engine.index();
+
+    const goOnly = await engine.search("SendMessageV2", { limit: 10, language: "go" });
+    expect(goOnly.length).toBeGreaterThan(0);
+    expect(goOnly.every((result) => result.filePath.endsWith(".go"))).toBe(true);
+
+    const patternOnly = await engine.search("SendMessageV2", { limit: 10, filePattern: "*.go" });
+    expect(patternOnly.length).toBeGreaterThan(0);
+    expect(patternOnly.every((result) => result.filePath.endsWith(".go"))).toBe(true);
+
+    const codeOnly = await engine.search("SendMessageV2", { limit: 10, codeOnly: true });
+    expect(codeOnly.length).toBeGreaterThan(0);
+    expect(codeOnly.every((result) => !result.filePath.endsWith(".md"))).toBe(true);
+
+    await engine.close();
+  });
+
+  it("classifies TypeScript node_modules dependencies as external", async () => {
+    const tmp = TempDir.create("ce-engine-ts-node-modules");
+    dirs.push(tmp);
+
+    const sourceDir = join(tmp.path, "repo", "src");
+    mkdirSync(join(sourceDir, "node_modules", "@scope", "pkg"), { recursive: true });
+
+    writeFileSync(
+      join(sourceDir, "node_modules", "@scope", "pkg", "index.d.ts"),
+      "export declare function fromPkg(): string;\n",
+    );
+
+    writeFileSync(
+      join(sourceDir, "util.ts"),
+      "export const localValue = 1;\n",
+    );
+
+    writeFileSync(
+      join(sourceDir, "app.ts"),
+      `import { fromPkg } from "@scope/pkg";
+import { localValue } from "./util";
+
+export const run = () => String(fromPkg()) + "-" + String(localValue);
+`,
+    );
+
+    const config = ConfigSchema.parse({
+      sources: [{ path: sourceDir }],
+      dataDir: join(tmp.path, "data"),
+      embedding: {
+        provider: "local",
+        localBackend: "mock",
+        dimensions: 768,
+      },
+    });
+
+    const engine = await ContextEngine.create(config);
+    await engine.index();
+
+    const deps = await engine.getDependencies("app.ts");
+    expect(deps).toContain("Dependency groups (heuristic):");
+    expect(deps).toMatch(/Internal \(\d+\): .*util\.ts/);
+    expect(deps).toMatch(/External \(\d+\): .*node_modules\/\@scope\/pkg\/index\.d\.ts/);
+    expect(deps).not.toMatch(/Internal \(\d+\): .*node_modules\/\@scope\/pkg\/index\.d\.ts/);
+
+    await engine.close();
+  });
+
   it("hydrates TS dependency graph from existing metadata on restart", async () => {
     const tmp = TempDir.create("ce-engine-ts-hydrate");
     dirs.push(tmp);
@@ -321,6 +423,7 @@ export function remoteCall() {
 
 import (
   "context"
+  "encoding/json"
   "fmt"
 )
 
@@ -330,6 +433,7 @@ type Service struct{}
 
 func (s *Service) Start(ctx context.Context) {
   fmt.Println(ctx)
+  _ = json.Valid([]byte("{}"))
 }
 
 func Use(s *Service, ctx context.Context) {
@@ -370,13 +474,30 @@ func main() {
     const deps = await engine.getDependencies("service/service.go");
     expect(deps).toContain("context");
     expect(deps).toContain("fmt");
+    expect(deps).toContain("encoding/json");
+    expect(deps).toContain("Dependency groups (heuristic):");
+    expect(deps).toContain("Stdlib");
+    expect(deps).toContain("- Internal (0)");
+    expect(deps).not.toContain("Internal (1): encoding/json");
+
+    const cmdDeps = await engine.getDependencies("cmd/main.go");
+    expect(cmdDeps).toContain("example.com/ce-go/service");
+    expect(cmdDeps).toContain("Stdlib");
+    expect(cmdDeps).toContain("Internal (1): example.com/ce-go/service");
 
     const goImporters = await engine.findImporters("service/service.go");
     expect(goImporters).toContain("cmd/main.go");
 
-    const refs = await engine.findReferences("Start", { filePath: "service/service.go", limit: 10 });
+    const refs = await engine.findReferences("Start", {
+      filePath: "service/service.go",
+      includeContext: true,
+      contextLines: 1,
+      limit: 10,
+    });
     expect(refs).toContain("References for Start");
     expect(refs).toContain("Requested backend: gopls");
+    expect(refs).toContain("References (with context):");
+    expect(refs).toMatch(/>\s+\d+:\s+s\.Start\(ctx\)/);
 
     const typeRefs = await engine.findReferences("Service", { filePath: "service/service.go", limit: 10 });
     expect(typeRefs).toContain("Requested backend: gopls");
@@ -386,6 +507,11 @@ func main() {
     expect(ambiguous).toContain("Actual backend: heuristic");
     expect(ambiguous).toContain("Candidate declarations:");
     expect(ambiguous).toContain("Guidance: Provide `filePath`");
+
+    const staleSymbol = await engine.findReferences("StartV2", { filePath: "service/service.go", limit: 10 });
+    expect(staleSymbol).toContain("symbol 'StartV2' was not found in service/service.go");
+    expect(staleSymbol).toContain("Did you mean:");
+    expect(staleSymbol).toContain("Start");
 
     await engine.close();
   });

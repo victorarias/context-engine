@@ -29,6 +29,19 @@ describe("TextChunker", () => {
     expect(chunks).toEqual([]);
   });
 
+  it("uses tighter windows for markdown/transcript content", () => {
+    const chunker = new TextChunker();
+    const content = Array.from({ length: 70 }, (_, index) => `line-${index + 1}`).join("\n");
+
+    const chunks = chunker.chunk(content, "docs/codex-transcripts/session.md", "markdown", "repo");
+
+    expect(chunks.length).toBe(3);
+    expect(chunks[0].startLine).toBe(1);
+    expect(chunks[0].endLine).toBe(32);
+    expect(chunks[1].startLine).toBe(25);
+    expect(chunks[2].endLine).toBe(70);
+  });
+
   it("throws on invalid overlap settings", () => {
     expect(() => new TextChunker({ windowLines: 5, overlapLines: 5 })).toThrow();
     expect(() => new TextChunker({ windowLines: 5, overlapLines: 6 })).toThrow();
