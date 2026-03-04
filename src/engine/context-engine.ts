@@ -14,6 +14,10 @@ import { chunkDocument, fetchDocument } from "../sources/doc-fetcher.js";
 import { WorktreeWatcher } from "./watcher.js";
 import { rerankCandidates } from "./reranker.js";
 import { TsDependencyService, type TsDependencyEdge } from "./ts-dependency-service.js";
+import { PyDependencyService, type PyDependencyEdge, isPythonStdlibModule } from "./py-dependency-service.js";
+import { StaticPythonSemanticProvider } from "./python-semantics/static-provider.js";
+import { JediPythonSemanticProvider } from "./python-semantics/jedi-provider.js";
+import type { PythonReferenceResult } from "./python-semantics/provider.js";
 import {
   LanceVectorStore,
   SQLiteMetadataStore,
@@ -23,6 +27,7 @@ import {
 import { logError, logEvent } from "../observability/logger.js";
 
 const DEFAULT_WORKTREE_ID = "default-worktree";
+const SYMBOL_SCHEMA_VERSION = "3";
 
 type GoReferenceResolution =
   | {
@@ -49,6 +54,9 @@ export class ContextEngine implements Engine {
   private readonly chunker = new HybridChunker();
   private readonly embedder: EmbeddingRuntimeProvider;
   private readonly tsDeps: TsDependencyService;
+  private readonly pyDeps: PyDependencyService;
+  private readonly pyRefsStatic: StaticPythonSemanticProvider;
+  private readonly pyRefsJedi: JediPythonSemanticProvider;
 
   private indexing = false;
   private indexedFiles = 0;
@@ -58,7 +66,9 @@ export class ContextEngine implements Engine {
   private watcher: WorktreeWatcher | null = null;
   private watcherReindexQueued = false;
   private tsDepsHydrated = false;
+  private pyDepsHydrated = false;
   private readonly queryLatency = new Map<string, number[]>();
+  private readonly pyReferenceBackendUsage = new Map<"python-jedi" | "python-static" | "heuristic" | "none", number>();
 
   private constructor(private readonly config: Config) {
     this.embedder = createEmbeddingProvider(config);
@@ -75,6 +85,22 @@ export class ContextEngine implements Engine {
     this.indexedRoots = config.sources.map((s) => s.path);
     this.repoId = this.makeRepoId(this.indexedRoots);
     this.tsDeps = new TsDependencyService(this.indexedRoots);
+    this.pyDeps = new PyDependencyService(this.indexedRoots, {
+      importAliases: config.python.importAliases,
+    });
+
+    this.pyRefsStatic = new StaticPythonSemanticProvider({
+      pyDeps: this.pyDeps,
+      findVisibleFiles: async () => this.findFiles("", { worktreeId: this.primaryWorktreeId }),
+      resolveFileOnDisk: (path: string) => this.resolveFileOnDisk(path),
+    });
+
+    this.pyRefsJedi = new JediPythonSemanticProvider({
+      pythonExecutable: config.python.jedi.pythonExecutable,
+      requestTimeoutMs: config.python.jedi.requestTimeoutMs,
+      roots: this.indexedRoots,
+      resolveFileOnDisk: (path: string) => this.resolveFileOnDisk(path),
+    });
   }
 
   static async create(config: Config): Promise<ContextEngine> {
@@ -92,9 +118,12 @@ export class ContextEngine implements Engine {
     // Best-effort AST parser warmup (tree-sitter). Failures are captured as warnings.
     try {
       await engine.chunker.warmup();
+      await engine.pyDeps.warmup();
+      await engine.pyRefsStatic.warmup();
+      await engine.pyRefsJedi.warmup();
     } catch (error) {
       logError("engine.create.chunker_warmup_failed", error);
-      // no-op; chunker has fallback path
+      // no-op; chunker/py dependency service have fallback paths
     }
 
     logEvent("info", "engine.create.complete", {
@@ -466,6 +495,7 @@ export class ContextEngine implements Engine {
       }
 
       await this.ensureTsDependencyGraph();
+      await this.ensurePyDependencyGraph();
 
       if (isTsLikePath(resolved)) {
         const tsEdges = this.lookupTsEdgesForFile(normalized, resolved);
@@ -488,6 +518,29 @@ export class ContextEngine implements Engine {
           `Dependencies for ${filePath} (ts-semantic):`,
           ...formatTsEdges(tsEdges),
           ...grouped,
+        ].join("\n");
+      }
+
+      if (isPythonPath(resolved)) {
+        const pyEdges = this.lookupPyEdgesForFile(normalized, resolved);
+        if (pyEdges.length === 0) {
+          return `No Python dependencies found in ${filePath}`;
+        }
+
+        const depValues = pyEdges
+          .map((edge) => edge.resolvedTarget ?? edge.rawSpecifier)
+          .filter((value): value is string => !!value)
+          .slice(0, 200);
+
+        return [
+          `Dependencies for ${filePath} (python-semantic):`,
+          ...formatPyEdges(pyEdges),
+          ...formatDependencyGroups(depValues, {
+            sourceFilePath: resolved,
+            language: inferLanguageFromPath(resolved),
+            indexedRoots: this.indexedRoots,
+            pythonEdges: pyEdges,
+          }),
         ].join("\n");
       }
 
@@ -517,6 +570,7 @@ export class ContextEngine implements Engine {
 
     try {
       await this.ensureTsDependencyGraph();
+      await this.ensurePyDependencyGraph();
 
       const query = target.trim();
       if (!query) {
@@ -524,44 +578,81 @@ export class ContextEngine implements Engine {
       }
 
       const limit = Math.max(1, options?.limit ?? 100);
-      const normalized = normalizePathForLookup(query, this.indexedRoots) ?? normalizeFilePath(query);
+      const normalizedRaw = normalizePathForLookup(query, this.indexedRoots) ?? normalizeFilePath(query);
+      const normalized = this.canonicalizeIndexedPath(normalizedRaw);
       const resolvedTarget = this.resolveFileOnDisk(normalized);
 
       const tsImporters = new Set<string>();
-      const tsCandidates = new Set<string>([normalized, normalizeFilePath(query)]);
+      const pyImporters = new Set<string>();
+      const graphCandidates = new Set<string>([normalized, normalizeFilePath(query)]);
       if (resolvedTarget) {
-        tsCandidates.add(normalizeFilePath(relative(process.cwd(), resolvedTarget)));
+        graphCandidates.add(normalizeFilePath(relative(process.cwd(), resolvedTarget)));
         for (const root of this.indexedRoots) {
-          tsCandidates.add(normalizeFilePath(relative(resolve(root), resolvedTarget)));
+          graphCandidates.add(normalizeFilePath(relative(resolve(root), resolvedTarget)));
         }
       }
 
-      for (const candidate of tsCandidates) {
+      for (const candidate of graphCandidates) {
         if (!candidate || candidate.startsWith("../")) continue;
+
         for (const importer of this.tsDeps.findImporters(candidate, { limit: limit * 2 })) {
           tsImporters.add(importer);
+        }
+
+        for (const importer of this.pyDeps.findImporters(candidate, { limit: limit * 2 })) {
+          pyImporters.add(importer);
         }
       }
 
       const staticImporters = await this.findImportersStatic(normalized, resolvedTarget, limit * 2);
 
-      const combined = Array.from(new Set([
+      const rawCombined = Array.from(new Set([
         ...Array.from(tsImporters),
+        ...Array.from(pyImporters),
         ...staticImporters,
-      ])).sort().slice(0, limit);
+      ])).sort();
+
+      const normalizedTargetForFilter = normalizeFilePath(normalized);
+      const excludeImporterExtensions = new Set(
+        this.config.python.excludeImporterExtensions.map((ext) => ext.toLowerCase()),
+      );
+
+      const filteredImporters = rawCombined
+        .filter((entry) => {
+          const normalizedEntry = normalizeFilePath(entry);
+          if (!this.config.python.showSelfEdges && normalizedEntry === normalizedTargetForFilter) {
+            return false;
+          }
+
+          const ext = extname(normalizedEntry).toLowerCase();
+          if (excludeImporterExtensions.has(ext)) {
+            return false;
+          }
+
+          return true;
+        });
+      const truncated = filteredImporters.length > limit;
+      const combined = filteredImporters.slice(0, limit);
 
       if (combined.length === 0) {
+        const pathHint = !resolvedTarget ? await this.buildDependencyPathSuggestion(normalized) : null;
+
         return [
           `Importers for ${query}:`,
           "No importers found.",
-          "Backends checked: ts-semantic graph + static import scan.",
-        ].join("\n");
+          !resolvedTarget
+            ? "Hint: target path was not found on disk. Ensure file paths match indexed paths (often without a leading 'src/')."
+            : undefined,
+          pathHint ? `Hint: ${pathHint}` : undefined,
+          "Backends checked: ts-semantic graph + py-semantic graph + static import scan.",
+        ].filter(Boolean).join("\n");
       }
 
       return [
         `Importers for ${query}:`,
         ...combined.map((entry) => `- ${entry}`),
-      ].join("\n");
+        truncated ? `Note: showing ${limit} of ${filteredImporters.length} importers (use a higher limit for full results).` : undefined,
+      ].filter(Boolean).join("\n");
     } finally {
       this.recordQueryLatency("find_importers", Date.now() - startedAt);
     }
@@ -581,6 +672,7 @@ export class ContextEngine implements Engine {
       ? normalizeFilePath(dirname(normalizedTarget))
       : normalizeFilePath(dirname(targetNoExt));
     const targetLooksLikePath = normalizedTarget.includes("/") || normalizedTarget.includes(".");
+    const allowDirectoryAlias = normalizedTarget.endsWith(".go") || extname(normalizedTarget) === "";
 
     const aliasTargets = new Set<string>();
     addTargetAlias(aliasTargets, normalizedTarget);
@@ -596,11 +688,15 @@ export class ContextEngine implements Engine {
         if (!rel.startsWith("../") && rel !== "..") {
           addTargetAlias(aliasTargets, rel);
           addTargetAlias(aliasTargets, stripCodeExtension(rel));
-          addTargetAlias(aliasTargets, normalizeFilePath(dirname(rel)));
+          if (allowDirectoryAlias) {
+            addTargetAlias(aliasTargets, normalizeFilePath(dirname(rel)));
+          }
 
           resolvedCandidates.add(rel);
           resolvedCandidates.add(stripCodeExtension(rel));
-          resolvedCandidates.add(normalizeFilePath(dirname(rel)));
+          if (allowDirectoryAlias) {
+            resolvedCandidates.add(normalizeFilePath(dirname(rel)));
+          }
         }
       }
     }
@@ -613,6 +709,10 @@ export class ContextEngine implements Engine {
 
     for (const relativePath of files) {
       if (matches.size >= limit) break;
+
+      if (!isCodeSearchCandidate(relativePath, inferLanguageFromPath(relativePath))) {
+        continue;
+      }
 
       const absolutePath = this.resolveFileOnDisk(relativePath);
       if (!absolutePath || !existsSync(absolutePath)) continue;
@@ -635,6 +735,7 @@ export class ContextEngine implements Engine {
             targetLooksLikePath,
             resolvedCandidates,
             aliasTargets,
+            allowDirectoryAlias,
           })
         ) {
           matches.add(relativePath);
@@ -691,6 +792,32 @@ export class ContextEngine implements Engine {
       count: values.length,
       p50: percentile(0.5),
       p95: percentile(0.95),
+    };
+  }
+
+  private summarizePythonReferenceBackends(): {
+    pythonJedi: number;
+    pythonStatic: number;
+    heuristic: number;
+    none: number;
+    semanticUsageRate: number;
+    fallbackRate: number;
+  } {
+    const pythonJedi = this.pyReferenceBackendUsage.get("python-jedi") ?? 0;
+    const pythonStatic = this.pyReferenceBackendUsage.get("python-static") ?? 0;
+    const heuristic = this.pyReferenceBackendUsage.get("heuristic") ?? 0;
+    const none = this.pyReferenceBackendUsage.get("none") ?? 0;
+
+    const total = pythonJedi + pythonStatic + heuristic + none;
+    const semantic = pythonJedi + pythonStatic;
+
+    return {
+      pythonJedi,
+      pythonStatic,
+      heuristic,
+      none,
+      semanticUsageRate: total === 0 ? 0 : semantic / total,
+      fallbackRate: total === 0 ? 0 : heuristic / total,
     };
   }
 
@@ -755,6 +882,7 @@ export class ContextEngine implements Engine {
     options?: { recursive?: boolean; maxFiles?: number },
   ): Promise<string> {
     await this.ensureTsDependencyGraph();
+    await this.ensurePyDependencyGraph();
 
     const recursive = options?.recursive ?? false;
     const maxFiles = Math.max(1, Math.min(500, Math.floor(options?.maxFiles ?? 50)));
@@ -795,6 +923,12 @@ export class ContextEngine implements Engine {
       if (isTsLikePath(absolutePath)) {
         const tsEdges = this.tsDeps.getFileEdges(relativePath);
         deps = tsEdges
+          .map((edge) => edge.resolvedTarget ?? edge.rawSpecifier)
+          .filter(Boolean)
+          .slice(0, 80);
+      } else if (isPythonPath(absolutePath)) {
+        const pyEdges = this.pyDeps.getFileEdges(relativePath);
+        deps = pyEdges
           .map((edge) => edge.resolvedTarget ?? edge.rawSpecifier)
           .filter(Boolean)
           .slice(0, 80);
@@ -864,14 +998,15 @@ export class ContextEngine implements Engine {
       const includeDeclaration = options?.includeDeclaration ?? false;
       const includeContext = options?.includeContext ?? false;
       const contextLines = Math.max(0, Math.min(8, Math.floor(options?.contextLines ?? 2)));
-      const normalizedFilePath = options?.filePath ? normalizeFilePath(options.filePath) : undefined;
+      const normalizedFilePath = options?.filePath ? this.canonicalizeIndexedPath(normalizeFilePath(options.filePath)) : undefined;
 
       const explicitGo = normalizedFilePath?.endsWith(".go") === true;
       const explicitTs = normalizedFilePath ? isTsLikePath(normalizedFilePath) : false;
+      const explicitPy = normalizedFilePath ? isPythonPath(normalizedFilePath) : false;
       const response = (params: {
         symbol: string;
-        requestedBackend: "gopls" | "tsserver" | "heuristic";
-        actualBackend: "gopls" | "tsserver" | "heuristic" | "none";
+        requestedBackend: "gopls" | "tsserver" | "python-static" | "python-jedi" | "heuristic";
+        actualBackend: "gopls" | "tsserver" | "python-static" | "python-jedi" | "heuristic" | "none";
         references: string[];
         fallbackReason?: string;
         candidates?: string[];
@@ -957,6 +1092,62 @@ export class ContextEngine implements Engine {
         references: fallback,
         fallbackReason: tsResult.resolution.reason,
         candidates: tsResult.resolution.candidates,
+      });
+    }
+
+    const shouldTryPython = explicitPy || (!normalizedFilePath && await this.hasPythonSymbolCandidate(query));
+    if (shouldTryPython) {
+      const requestedPythonBackend = this.resolveRequestedPythonBackend(Boolean(normalizedFilePath));
+
+      if (explicitPy && normalizedFilePath && !this.resolveFileOnDisk(normalizedFilePath)) {
+        const suggestion = await this.buildDependencyPathSuggestion(normalizedFilePath);
+        this.recordPythonReferenceBackendUsage("none");
+        return response({
+          symbol: query,
+          requestedBackend: requestedPythonBackend,
+          actualBackend: "none",
+          references: [],
+          fallbackReason: `Python file not found on disk: ${normalizedFilePath}${suggestion ? ` | ${suggestion}` : ""}`,
+          guidance: "Check filePath and ensure it matches indexed file paths (often without a leading 'src/').",
+        });
+      }
+
+      const pyResult = await this.findReferencesWithPythonBackends({
+        symbol: query,
+        filePath: normalizedFilePath,
+        includeDeclaration,
+        limit,
+      });
+
+      if (pyResult.backend !== "none" && pyResult.references.length > 0) {
+        this.recordPythonReferenceBackendUsage(pyResult.backend);
+        return response({
+          symbol: query,
+          requestedBackend: requestedPythonBackend,
+          actualBackend: pyResult.backend,
+          references: pyResult.references,
+          fallbackReason: pyResult.reason,
+          candidates: pyResult.candidates,
+        });
+      }
+
+      const fallback = await this.findReferencesHeuristic(query, {
+        filePath: normalizedFilePath,
+        limit,
+      });
+
+      this.recordPythonReferenceBackendUsage("heuristic");
+
+      return response({
+        symbol: query,
+        requestedBackend: requestedPythonBackend,
+        actualBackend: "heuristic",
+        references: fallback,
+        fallbackReason: pyResult.reason ?? "python semantic backend did not return references",
+        candidates: pyResult.candidates,
+        guidance: normalizedFilePath
+          ? "Provide an exact declaration filePath and symbol for best Python reference precision."
+          : "Provide filePath for Python symbols to reduce ambiguity.",
       });
     }
 
@@ -1113,10 +1304,83 @@ export class ContextEngine implements Engine {
     }
   }
 
+  private async hasPythonSymbolCandidate(symbol: string): Promise<boolean> {
+    const matches = await this.metadataStore.getSymbols({
+      name: symbol,
+      repoId: this.repoId,
+      limit: 25,
+    });
+
+    return matches.some((entry) => entry.filePath.endsWith(".py") && entry.name === symbol);
+  }
+
+  private resolveRequestedPythonBackend(hasAnchorFilePath: boolean): "python-static" | "python-jedi" {
+    if (this.config.python.referencesBackend === "static") {
+      return "python-static";
+    }
+
+    if (this.config.python.referencesBackend === "jedi") {
+      return "python-jedi";
+    }
+
+    return hasAnchorFilePath ? "python-jedi" : "python-static";
+  }
+
+  private recordPythonReferenceBackendUsage(backend: "python-jedi" | "python-static" | "heuristic" | "none"): void {
+    const current = this.pyReferenceBackendUsage.get(backend) ?? 0;
+    this.pyReferenceBackendUsage.set(backend, current + 1);
+  }
+
+  private async findReferencesWithPythonBackends(query: {
+    symbol: string;
+    filePath?: string;
+    includeDeclaration?: boolean;
+    limit: number;
+  }): Promise<PythonReferenceResult> {
+    await this.ensurePyDependencyGraph();
+
+    const configured = this.config.python.referencesBackend;
+
+    const hasAnchorFilePath = !!query.filePath;
+    if (configured === "jedi" && !hasAnchorFilePath) {
+      return {
+        backend: "none",
+        confidence: "low",
+        references: [],
+        reason: "jedi backend requires filePath anchor",
+      };
+    }
+
+    const tryJediFirst = (configured === "jedi" || configured === "auto") && hasAnchorFilePath;
+    const tryStatic = configured === "static" || configured === "auto";
+
+    if (tryJediFirst) {
+      const jedi = await this.pyRefsJedi.findReferences(query);
+      if (jedi.backend === "python-jedi" && jedi.references.length > 0) {
+        return jedi;
+      }
+
+      if (configured === "jedi") {
+        return jedi;
+      }
+    }
+
+    if (tryStatic) {
+      return this.pyRefsStatic.findReferences(query);
+    }
+
+    return {
+      backend: "none",
+      confidence: "low",
+      references: [],
+      reason: "python references backend disabled",
+    };
+  }
+
   private formatFindReferencesResponse(params: {
     symbol: string;
-    requestedBackend: "gopls" | "tsserver" | "heuristic";
-    actualBackend: "gopls" | "tsserver" | "heuristic" | "none";
+    requestedBackend: "gopls" | "tsserver" | "python-static" | "python-jedi" | "heuristic";
+    actualBackend: "gopls" | "tsserver" | "python-static" | "python-jedi" | "heuristic" | "none";
     references: string[];
     fallbackReason?: string;
     candidates?: string[];
@@ -1273,8 +1537,10 @@ export class ContextEngine implements Engine {
     }
 
     await this.ensureTsDependencyGraph();
+    await this.ensurePyDependencyGraph();
     const tsStats = this.tsDeps.getStats();
     const tsProgramCache = this.tsDeps.getProgramCacheStats();
+    const pyStats = this.pyDeps.getStats();
 
     return {
       indexing: this.indexing,
@@ -1298,6 +1564,10 @@ export class ContextEngine implements Engine {
         goDependencies: "native",
         tsDependencies: "compiler-api",
         tsReferences: "compiler-api",
+        pyDependencies: "tree-sitter-resolver",
+        pyReferences: this.config.python.referencesBackend === "jedi"
+          ? "python-jedi"
+          : (this.config.python.referencesBackend === "static" ? "python-static" : "hybrid"),
       },
       tsDependencyGraph: {
         filesIndexed: tsStats.filesIndexed,
@@ -1310,6 +1580,22 @@ export class ContextEngine implements Engine {
         programCacheMisses: tsProgramCache.misses,
         cachedPrograms: tsProgramCache.size,
       },
+      pyDependencyGraph: {
+        filesIndexed: pyStats.filesIndexed,
+        edgesTotal: pyStats.edgesTotal,
+        edgesResolved: pyStats.edgesResolved,
+        edgesUnresolved: pyStats.edgesUnresolved,
+        resolutionSuccessRate: pyStats.resolutionSuccessRate,
+        internalEdgesTotal: pyStats.internalEdgesTotal,
+        internalEdgesResolved: pyStats.internalEdgesResolved,
+        internalResolutionRate: pyStats.internalResolutionRate,
+        stdlibEdges: pyStats.stdlibEdges,
+        externalEdges: pyStats.externalEdges,
+        aliasResolvedEdges: pyStats.aliasResolvedEdges,
+        lastBuiltAt: pyStats.lastBuiltAt,
+        parserReady: pyStats.parserReady,
+      },
+      pyReferenceBackends: this.summarizePythonReferenceBackends(),
       queryLatencyMs: {
         getDependencies: this.summarizeLatency("get_dependencies"),
         findImporters: this.summarizeLatency("find_importers"),
@@ -1327,8 +1613,12 @@ export class ContextEngine implements Engine {
 
     this.indexedRoots = roots;
     this.tsDeps.setRoots(roots);
+    this.pyDeps.setRoots(roots);
+    this.pyDeps.setImportAliases(this.config.python.importAliases);
+    this.pyRefsJedi.setRoots(roots);
     if (rootsChanged) {
       this.tsDepsHydrated = false;
+      this.pyDepsHydrated = false;
     }
 
     const startedAt = Date.now();
@@ -1336,7 +1626,12 @@ export class ContextEngine implements Engine {
     let changedFiles = 0;
     const tsChangedPaths = new Set<string>();
     const tsRemovedPaths = new Set<string>();
+    const pyChangedPaths = new Set<string>();
+    const pyRemovedPaths = new Set<string>();
     let tsConfigTouched = false;
+
+    const previousSymbolSchemaVersion = await this.metadataStore.getIndexState("engine:symbolSchemaVersion");
+    const forceSymbolRefresh = previousSymbolSchemaVersion !== SYMBOL_SCHEMA_VERSION;
 
     logEvent("info", "engine.index.start", {
       roots,
@@ -1391,7 +1686,9 @@ export class ContextEngine implements Engine {
             ? previousDirtyEntry?.contentHash === file.contentHash
             : !previousDirtyEntry;
 
-          if (unchangedContent && unchangedOverlay) {
+          const forceSymbolRefreshForFile = forceSymbolRefresh && isCodeSearchCandidate(filePath, file.language);
+
+          if (unchangedContent && unchangedOverlay && !forceSymbolRefreshForFile) {
             continue;
           }
 
@@ -1400,6 +1697,9 @@ export class ContextEngine implements Engine {
           const normalizedChangedPath = normalizeFilePath(filePath);
           if (isTsLikePath(normalizedChangedPath)) {
             tsChangedPaths.add(normalizedChangedPath);
+          }
+          if (isPythonPath(normalizedChangedPath)) {
+            pyChangedPaths.add(normalizedChangedPath);
           }
           const fileBaseName = basename(normalizedChangedPath).toLowerCase();
           if (fileBaseName === "tsconfig.json" || fileBaseName === "jsconfig.json") {
@@ -1456,12 +1756,18 @@ export class ContextEngine implements Engine {
             await this.metadataStore.deleteDirtyFile(worktreeId, filePath);
           }
 
-          if (contentChanged) {
+          if (contentChanged || forceSymbolRefreshForFile) {
             await this.metadataStore.deleteSymbolsByFile(filePath);
             const symbols = chunksToSymbols(symbolChunks, context.repoId);
-            const fallbackSymbols = symbols.length > 0 ? symbols : extractSymbols(content, filePath, context.repoId);
-            if (fallbackSymbols.length) {
-              await this.metadataStore.upsertSymbols(fallbackSymbols);
+
+            const symbolsToPersist = isPythonPath(filePath)
+              ? mergeSymbols(symbols, extractSymbols(content, filePath, context.repoId))
+              : symbols.length > 0
+                ? symbols
+                : extractSymbols(content, filePath, context.repoId);
+
+            if (symbolsToPersist.length) {
+              await this.metadataStore.upsertSymbols(symbolsToPersist);
             }
           }
 
@@ -1476,6 +1782,9 @@ export class ContextEngine implements Engine {
             const normalizedRemovedPath = normalizeFilePath(filePath);
             if (isTsLikePath(normalizedRemovedPath)) {
               tsRemovedPaths.add(normalizedRemovedPath);
+            }
+            if (isPythonPath(normalizedRemovedPath)) {
+              pyRemovedPaths.add(normalizedRemovedPath);
             }
             const removedBaseName = basename(normalizedRemovedPath).toLowerCase();
             if (removedBaseName === "tsconfig.json" || removedBaseName === "jsconfig.json") {
@@ -1495,6 +1804,9 @@ export class ContextEngine implements Engine {
             if (isTsLikePath(normalizedRemovedPath)) {
               tsRemovedPaths.add(normalizedRemovedPath);
             }
+            if (isPythonPath(normalizedRemovedPath)) {
+              pyRemovedPaths.add(normalizedRemovedPath);
+            }
             const removedBaseName = basename(normalizedRemovedPath).toLowerCase();
             if (removedBaseName === "tsconfig.json" || removedBaseName === "jsconfig.json") {
               tsConfigTouched = true;
@@ -1512,6 +1824,12 @@ export class ContextEngine implements Engine {
         removedPaths: Array.from(tsRemovedPaths),
         forceRebuild: rootsChanged || tsConfigTouched || !this.tsDepsHydrated,
       });
+      await this.updatePyDependencyGraph({
+        changedPaths: Array.from(pyChangedPaths),
+        removedPaths: Array.from(pyRemovedPaths),
+        forceRebuild: rootsChanged || !this.pyDepsHydrated,
+      });
+      await this.metadataStore.setIndexState("engine:symbolSchemaVersion", SYMBOL_SCHEMA_VERSION);
       await this.metadataStore.setIndexState("engine:lastIndexedAt", String(Date.now()));
 
       logEvent("info", "engine.index.complete", {
@@ -1636,6 +1954,65 @@ export class ContextEngine implements Engine {
     this.tsDepsHydrated = true;
 
     logEvent("debug", "engine.ts_graph.updated", {
+      mode: "incremental",
+      visibleFiles: visible.length,
+      changed: options.changedPaths.length,
+      removed: options.removedPaths.length,
+      durationMs: Date.now() - startedAt,
+    });
+  }
+
+  private async ensurePyDependencyGraph(): Promise<void> {
+    if (this.pyDepsHydrated) {
+      return;
+    }
+
+    await this.updatePyDependencyGraph({
+      changedPaths: [],
+      removedPaths: [],
+      forceRebuild: true,
+    });
+  }
+
+  private async updatePyDependencyGraph(options: {
+    changedPaths: string[];
+    removedPaths: string[];
+    forceRebuild: boolean;
+  }): Promise<void> {
+    const startedAt = Date.now();
+    await this.ensurePrimaryWorktreeSelected();
+    await this.pyDeps.warmup();
+
+    const treeEntries = await this.metadataStore.getTreeEntries(this.primaryWorktreeId);
+    const dirtyEntries = await this.metadataStore.getDirtyFiles(this.primaryWorktreeId);
+    const visible = Array.from(new Set([
+      ...treeEntries.map((entry) => entry.path),
+      ...dirtyEntries.map((entry) => entry.path),
+    ])).sort();
+
+    if (options.forceRebuild || !this.pyDepsHydrated) {
+      this.pyDeps.rebuild(visible);
+      this.pyDepsHydrated = true;
+      logEvent("debug", "engine.py_graph.updated", {
+        mode: "rebuild",
+        visibleFiles: visible.length,
+        durationMs: Date.now() - startedAt,
+      });
+      return;
+    }
+
+    if (options.changedPaths.length === 0 && options.removedPaths.length === 0) {
+      return;
+    }
+
+    this.pyDeps.applyDelta({
+      visibleFiles: visible,
+      changedPaths: options.changedPaths,
+      removedPaths: options.removedPaths,
+    });
+    this.pyDepsHydrated = true;
+
+    logEvent("debug", "engine.py_graph.updated", {
       mode: "incremental",
       visibleFiles: visible.length,
       changed: options.changedPaths.length,
@@ -2038,6 +2415,45 @@ export class ContextEngine implements Engine {
     return [];
   }
 
+  private lookupPyEdgesForFile(normalizedPath: string, absolutePath: string): PyDependencyEdge[] {
+    const candidates = new Set<string>([
+      normalizeFilePath(normalizedPath),
+      normalizeFilePath(relative(process.cwd(), absolutePath)),
+    ]);
+
+    for (const root of this.indexedRoots) {
+      candidates.add(normalizeFilePath(relative(resolve(root), absolutePath)));
+    }
+
+    for (const candidate of candidates) {
+      if (!candidate || candidate.startsWith("../")) continue;
+      const edges = this.pyDeps.getFileEdges(candidate);
+      if (edges.length > 0) {
+        return edges;
+      }
+    }
+
+    return [];
+  }
+
+  private canonicalizeIndexedPath(path: string): string {
+    const normalized = normalizeFilePath(path);
+    if (!normalized) return normalized;
+
+    if (this.resolveFileOnDisk(normalized)) {
+      return normalized;
+    }
+
+    if (normalized.startsWith("src/")) {
+      const stripped = normalized.slice("src/".length);
+      if (stripped && this.resolveFileOnDisk(stripped)) {
+        return stripped;
+      }
+    }
+
+    return normalized;
+  }
+
   private resolveFileOnDisk(filePath: string): string | null {
     const normalized = normalizeFilePath(filePath);
 
@@ -2083,6 +2499,10 @@ function isTsLikePath(path: string): boolean {
   return ext === ".ts" || ext === ".tsx" || ext === ".mts" || ext === ".cts" || ext === ".js" || ext === ".jsx" || ext === ".mjs" || ext === ".cjs";
 }
 
+function isPythonPath(path: string): boolean {
+  return extname(path).toLowerCase() === ".py";
+}
+
 function formatTsEdges(edges: TsDependencyEdge[]): string[] {
   const seen = new Set<string>();
   const lines: string[] = [];
@@ -2103,9 +2523,29 @@ function formatTsEdges(edges: TsDependencyEdge[]): string[] {
   return lines;
 }
 
+function formatPyEdges(edges: PyDependencyEdge[]): string[] {
+  const seen = new Set<string>();
+  const lines: string[] = [];
+
+  for (const edge of edges) {
+    const target = edge.resolvedTarget ?? `unresolved:${edge.rawSpecifier}`;
+    const key = `${edge.edgeKind}:${edge.level}:${target}:${edge.rawSpecifier}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+
+    if (edge.resolvedTarget) {
+      lines.push(`- [${edge.edgeKind}] ${edge.resolvedTarget} (from '${edge.rawSpecifier}')`);
+    } else {
+      lines.push(`- [${edge.edgeKind}] ${edge.rawSpecifier} (unresolved: ${edge.unresolvedReason ?? "unknown"})`);
+    }
+  }
+
+  return lines;
+}
+
 function formatDependencyGroups(
   dependencies: string[],
-  context?: { sourceFilePath?: string; language?: string; indexedRoots?: string[] },
+  context?: { sourceFilePath?: string; language?: string; indexedRoots?: string[]; pythonEdges?: PyDependencyEdge[] },
 ): string[] {
   if (dependencies.length === 0) {
     return [];
@@ -2116,6 +2556,12 @@ function formatDependencyGroups(
     return formatGoDependencyGroups(dependencies, {
       sourceFilePath: context?.sourceFilePath,
       indexedRoots: context?.indexedRoots,
+    });
+  }
+
+  if (language === "python") {
+    return formatPythonDependencyGroups(dependencies, {
+      pythonEdges: context?.pythonEdges,
     });
   }
 
@@ -2165,6 +2611,69 @@ function formatGoDependencyGroups(
     renderDependencyGroupLine("Stdlib", stdlib),
     renderDependencyGroupLine("External", external),
   ];
+}
+
+function formatPythonDependencyGroups(
+  dependencies: string[],
+  context?: { pythonEdges?: PyDependencyEdge[] },
+): string[] {
+  const internal: string[] = [];
+  const stdlib: string[] = [];
+  const external: string[] = [];
+
+  if (context?.pythonEdges && context.pythonEdges.length > 0) {
+    for (const edge of context.pythonEdges) {
+      const display = edge.resolvedTarget ?? edge.rawSpecifier;
+      if (!display) continue;
+
+      if (edge.resolvedTarget) {
+        internal.push(edge.resolvedTarget);
+        continue;
+      }
+
+      const topLevel = topLevelPythonModule(edge.rawSpecifier);
+      if (topLevel && isPythonStdlibModule(topLevel)) {
+        stdlib.push(topLevel);
+      } else {
+        external.push(display);
+      }
+    }
+  } else {
+    for (const dependency of dependencies) {
+      const normalized = dependency.trim();
+      if (!normalized) continue;
+
+      if (normalized.endsWith(".py") || normalized.startsWith(".") || normalized.includes("/")) {
+        internal.push(normalized);
+        continue;
+      }
+
+      const topLevel = topLevelPythonModule(normalized);
+      if (topLevel && isPythonStdlibModule(topLevel)) {
+        stdlib.push(topLevel);
+      } else {
+        external.push(normalized);
+      }
+    }
+  }
+
+  return [
+    "Dependency groups (heuristic):",
+    renderDependencyGroupLine("Internal", internal),
+    renderDependencyGroupLine("Stdlib", stdlib),
+    renderDependencyGroupLine("External", external),
+  ];
+}
+
+function topLevelPythonModule(specifier: string): string {
+  const stripped = specifier.trim().replace(/^\.+/, "");
+  if (!stripped) return "";
+
+  if (stripped.includes("/")) {
+    return (stripped.split("/")[0] ?? "").trim();
+  }
+
+  return (stripped.split(".")[0] ?? "").trim();
 }
 
 function renderDependencyGroupLine(label: string, entries: string[]): string {
@@ -2361,6 +2870,7 @@ function dependencyMatchesTarget(
     targetLooksLikePath: boolean;
     resolvedCandidates: Set<string>;
     aliasTargets: Set<string>;
+    allowDirectoryAlias: boolean;
   },
 ): boolean {
   if (!dep) return false;
@@ -2376,11 +2886,15 @@ function dependencyMatchesTarget(
   if (context.targetLooksLikePath) {
     if (
       dep.endsWith(`/${context.normalizedTarget}`) ||
-      dep.endsWith(`/${context.targetNoExt}`) ||
-      dep === context.targetDir ||
-      dep.endsWith(`/${context.targetDir}`)
+      dep.endsWith(`/${context.targetNoExt}`)
     ) {
       return true;
+    }
+
+    if (context.allowDirectoryAlias) {
+      if (dep === context.targetDir || dep.endsWith(`/${context.targetDir}`)) {
+        return true;
+      }
     }
 
     for (const alias of context.aliasTargets) {
@@ -2416,7 +2930,7 @@ function extractDependencies(content: string, filePath?: string, roots: string[]
   for (const match of content.matchAll(/require\(["']([^"']+)["']\)/g)) {
     add(match[1]);
   }
-  for (const match of content.matchAll(/^\s*from\s+([a-zA-Z0-9_\.]+)\s+import\s+/gm)) {
+  for (const match of content.matchAll(/^\s*from\s+([.a-zA-Z0-9_]+)\s+import\s+/gm)) {
     add(match[1]);
   }
   for (const match of content.matchAll(/^\s*import\s+([a-zA-Z0-9_\.]+)/gm)) {
@@ -2468,6 +2982,30 @@ function formatDependencySpecifier(
     return normalized;
   }
 
+  if (context.language === "python" && trimmed.startsWith(".") && context.sourceFilePath) {
+    const dotPrefix = trimmed.match(/^\.+/)?.[0] ?? "";
+    const level = dotPrefix.length;
+    const remainder = trimmed.slice(level).replaceAll(".", "/").replace(/^\/+/, "");
+
+    let baseDir = dirname(context.sourceFilePath);
+    const ascend = Math.max(0, level - 1);
+    for (let step = 0; step < ascend; step++) {
+      baseDir = dirname(baseDir);
+    }
+
+    const absolute = remainder ? resolve(baseDir, remainder) : baseDir;
+    const normalized = normalizeFilePath(absolute);
+
+    for (const root of context.roots) {
+      const rel = normalizeFilePath(relative(resolve(root), absolute));
+      if (!rel.startsWith("../") && rel !== "..") {
+        return rel;
+      }
+    }
+
+    return normalized;
+  }
+
   return trimmed;
 }
 
@@ -2492,6 +3030,20 @@ function chunksToSymbols(chunks: Chunk[], repoId: string): SymbolInfo[] {
   });
 }
 
+function mergeSymbols(primary: SymbolInfo[], supplemental: SymbolInfo[]): SymbolInfo[] {
+  const out: SymbolInfo[] = [];
+  const seen = new Set<string>();
+
+  for (const symbol of [...primary, ...supplemental]) {
+    const key = `${symbol.filePath}:${symbol.startLine}:${symbol.name}:${symbol.kind}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(symbol);
+  }
+
+  return out;
+}
+
 function extractSymbols(content: string, filePath: string, repoId: string): SymbolInfo[] {
   const symbols: SymbolInfo[] = [];
 
@@ -2503,8 +3055,8 @@ function extractSymbols(content: string, filePath: string, repoId: string): Symb
     { regex: /^\s*(?:export\s+)?type\s+([A-Za-z_$][\w$]*)\s*=/gm, kind: "type", group: 1 },
 
     // Python
-    { regex: /^\s*def\s+([A-Za-z_][\w]*)\s*\(/gm, kind: "function", group: 1 },
     { regex: /^\s*class\s+([A-Za-z_][\w]*)/gm, kind: "class", group: 1 },
+    { regex: /^([A-Z][A-Z0-9_]*)(?:\s*:\s*[^=]+)?\s*=/gm, kind: "variable", group: 1 },
 
     // Go
     { regex: /^\s*func\s+([A-Za-z_][\w]*)\s*\(/gm, kind: "function", group: 1 },
@@ -2544,6 +3096,87 @@ function extractSymbols(content: string, filePath: string, repoId: string): Symb
     }
   }
 
+  if (extname(filePath).toLowerCase() === ".py") {
+    const lines = content.split(/\r?\n/);
+    const classStack: Array<{ indent: number; name: string }> = [];
+
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i] ?? "";
+      const trimmed = line.trim();
+      const indent = indentation(line);
+
+      if (trimmed && !trimmed.startsWith("#")) {
+        while (classStack.length > 0 && indent <= classStack[classStack.length - 1]!.indent) {
+          classStack.pop();
+        }
+      }
+
+      const classMatch = line.match(/^\s*class\s+([A-Za-z_][\w]*)\s*(?:\([^)]*\))?\s*:/);
+      if (classMatch?.[1]) {
+        classStack.push({ indent, name: classMatch[1] });
+      }
+
+      const defMatch = line.match(/^\s*def\s+([A-Za-z_][\w]*)\s*\(/);
+      if (defMatch?.[1]) {
+        const kind: SymbolInfo["kind"] = classStack.length > 0 ? "method" : "function";
+        symbols.push({
+          name: defMatch[1],
+          kind,
+          filePath,
+          startLine: i + 1,
+          endLine: i + 1,
+          repoId,
+        });
+      }
+
+      const match = line.match(/^(__all__)(?:\s*:\s*[^=]+)?\s*=/);
+      if (!match) continue;
+      if (line.trimStart() !== line.trim()) continue;
+
+      const endLine = findPythonAssignmentEndLine(lines, i + 1);
+
+      symbols.push({
+        name: "__all__",
+        kind: "variable",
+        filePath,
+        startLine: i + 1,
+        endLine,
+        repoId,
+      });
+    }
+
+    if (basename(filePath) === "__init__.py") {
+      for (let i = 0; i < lines.length; i++) {
+        const line = lines[i] ?? "";
+        const fromMatch = line.match(/^\s*from\s+[.A-Za-z0-9_]+\s+import\s+(.+)$/);
+        if (!fromMatch) continue;
+
+        const importClause = (fromMatch[1] ?? "")
+          .split("#")[0]
+          .trim();
+        if (!importClause || importClause === "*") continue;
+
+        const names = importClause
+          .split(",")
+          .map((value) => value.trim())
+          .map((value) => (value.split(/\s+as\s+/i)[1] ?? value.split(/\s+as\s+/i)[0] ?? "").trim())
+          .filter(Boolean)
+          .filter((value) => value !== "*");
+
+        for (const name of names) {
+          symbols.push({
+            name,
+            kind: "module",
+            filePath,
+            startLine: i + 1,
+            endLine: i + 1,
+            repoId,
+          });
+        }
+      }
+    }
+  }
+
   // unique by name+line
   const seen = new Set<string>();
   return symbols.filter((s) => {
@@ -2552,6 +3185,53 @@ function extractSymbols(content: string, filePath: string, repoId: string): Symb
     seen.add(key);
     return true;
   });
+}
+
+function indentation(line: string): number {
+  const m = line.match(/^\s*/);
+  return m?.[0].length ?? 0;
+}
+
+function findPythonAssignmentEndLine(lines: string[], startLine: number): number {
+  const startIndex = Math.max(0, startLine - 1);
+  let endIndex = startIndex;
+
+  const firstLine = lines[startIndex] ?? "";
+  let balance = bracketBalance(firstLine);
+  let continuation = /\\\s*$/.test(firstLine.trimEnd());
+  const baseIndent = firstLine.match(/^\s*/)?.[0].length ?? 0;
+
+  for (let i = startIndex + 1; i < lines.length; i++) {
+    const line = lines[i] ?? "";
+    const trimmed = line.trim();
+    const indent = line.match(/^\s*/)?.[0].length ?? 0;
+
+    if (!trimmed) {
+      endIndex = i;
+      continue;
+    }
+
+    if (balance <= 0 && !continuation && indent <= baseIndent) {
+      break;
+    }
+
+    endIndex = i;
+    balance += bracketBalance(line);
+    continuation = /\\\s*$/.test(trimmed);
+  }
+
+  return endIndex + 1;
+}
+
+function bracketBalance(line: string): number {
+  let delta = 0;
+
+  for (const ch of line) {
+    if (ch === "[" || ch === "(" || ch === "{") delta += 1;
+    if (ch === "]" || ch === ")" || ch === "}") delta -= 1;
+  }
+
+  return delta;
 }
 
 function formatReferencePath(line: string): string | null {

@@ -79,6 +79,20 @@ const WatcherSchema = z.object({
   pollIntervalMs: z.number().int().min(50).default(750),
 });
 
+const PythonSchema = z.object({
+  referencesBackend: z.enum(["auto", "static", "jedi"]).default("auto"),
+  importAliases: z.record(z.string(), z.string()).default({}),
+  excludeImporterExtensions: z.array(z.string()).default([".md", ".txt", ".rst"]),
+  showSelfEdges: z.boolean().default(false),
+  jedi: z.object({
+    pythonExecutable: z.string().default("python3"),
+    requestTimeoutMs: z.number().int().min(500).default(4000),
+  }).default({
+    pythonExecutable: "python3",
+    requestTimeoutMs: 4000,
+  }),
+});
+
 export const ConfigSchema = z.object({
   sources: z.array(SourceSchema).default([]),
   embedding: EmbeddingSchema.default({
@@ -112,6 +126,16 @@ export const ConfigSchema = z.object({
     enabled: true,
     debounceMs: 250,
     pollIntervalMs: 750,
+  }),
+  python: PythonSchema.default({
+    referencesBackend: "auto",
+    importAliases: {},
+    excludeImporterExtensions: [".md", ".txt", ".rst"],
+    showSelfEdges: false,
+    jedi: {
+      pythonExecutable: "python3",
+      requestTimeoutMs: 4000,
+    },
   }),
   docs: z.array(z.object({
     url: z.string(),

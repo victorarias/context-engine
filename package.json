@@ -17,6 +17,7 @@
     "test:integration:core": "bun run test:logs:prepare && CE_LOG_LEVEL=debug CE_LOG_FILE=.context-engine/test-logs/integration-core.log bun test tests/integration/context-engine.test.ts tests/integration/watcher.test.ts tests/integration/security.test.ts tests/integration/local-fs.test.ts tests/integration/docs-connector.test.ts",
     "test:integration:storage": "bun run test:logs:prepare && CE_LOG_LEVEL=debug CE_LOG_FILE=.context-engine/test-logs/integration-storage.log bun test tests/integration/metadata-store.test.ts tests/integration/write-log.test.ts tests/integration/consistency-checker.test.ts",
     "test:integration": "bun run test:integration:core && bun run test:integration:storage",
+    "test:jedi": "bun run test:logs:prepare && CE_LOG_LEVEL=debug CE_LOG_FILE=.context-engine/test-logs/jedi.log CE_REQUIRE_JEDI=1 bun test tests/integration/python-jedi-provider.test.ts",
     "test:e2e": "bun run test:logs:prepare && CE_LOG_LEVEL=debug CE_LOG_FILE=.context-engine/test-logs/e2e.log bun test tests/e2e/",
     "test:contract": "bun run test:logs:prepare && CE_LOG_LEVEL=debug CE_LOG_FILE=.context-engine/test-logs/contract.log bun test tests/contract/",
     "test:eval": "bun run test:logs:prepare && CE_LOG_LEVEL=debug CE_LOG_FILE=.context-engine/test-logs/eval.log bun test tests/eval/",

@@ -228,6 +228,12 @@ function formatStatus(status: Awaited<ReturnType<Engine["status"]>>): string {
     if (status.capabilities.tsReferences) {
       caps.push(`tsReferences=${status.capabilities.tsReferences}`);
     }
+    if (status.capabilities.pyDependencies) {
+      caps.push(`pyDependencies=${status.capabilities.pyDependencies}`);
+    }
+    if (status.capabilities.pyReferences) {
+      caps.push(`pyReferences=${status.capabilities.pyReferences}`);
+    }
     if (caps.length > 0) {
       lines.push(`Capabilities: ${caps.join(", ")}`);
     }
@@ -239,6 +245,21 @@ function formatStatus(status: Awaited<ReturnType<Engine["status"]>>): string {
     );
     lines.push(
       `TS program cache: ${status.tsDependencyGraph.programCacheHits} hits / ${status.tsDependencyGraph.programCacheMisses} misses (${status.tsDependencyGraph.cachedPrograms} cached programs)`,
+    );
+  }
+
+  if (status.pyDependencyGraph) {
+    lines.push(
+      `PY graph: ${status.pyDependencyGraph.filesIndexed} files, ${status.pyDependencyGraph.edgesResolved}/${status.pyDependencyGraph.edgesTotal} edges resolved (${(status.pyDependencyGraph.resolutionSuccessRate * 100).toFixed(1)}%), internal=${status.pyDependencyGraph.internalEdgesResolved}/${status.pyDependencyGraph.internalEdgesTotal} (${(status.pyDependencyGraph.internalResolutionRate * 100).toFixed(1)}%), parser=${status.pyDependencyGraph.parserReady ? "ready" : "fallback"}`,
+    );
+    lines.push(
+      `PY edge classes: stdlib=${status.pyDependencyGraph.stdlibEdges}, external=${status.pyDependencyGraph.externalEdges}, aliasResolved=${status.pyDependencyGraph.aliasResolvedEdges}`,
+    );
+  }
+
+  if (status.pyReferenceBackends) {
+    lines.push(
+      `PY refs backend: jedi=${status.pyReferenceBackends.pythonJedi}, static=${status.pyReferenceBackends.pythonStatic}, heuristic=${status.pyReferenceBackends.heuristic}, none=${status.pyReferenceBackends.none}, semanticUsage=${(status.pyReferenceBackends.semanticUsageRate * 100).toFixed(1)}%, fallback=${(status.pyReferenceBackends.fallbackRate * 100).toFixed(1)}%`,
     );
   }
 

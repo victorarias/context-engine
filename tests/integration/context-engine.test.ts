@@ -174,6 +174,242 @@ export const run = () => String(fromPkg()) + "-" + String(localValue);
     await engine.close();
   });
 
+  it("resolves Python dependencies/importers with stdlib classification", async () => {
+    const tmp = TempDir.create("ce-engine-py-deps");
+    dirs.push(tmp);
+
+    const sourceDir = join(tmp.path, "repo", "src");
+    mkdirSync(join(sourceDir, "reme", "core", "schema"), { recursive: true });
+
+    writeFileSync(join(sourceDir, "reme", "__init__.py"), "");
+    writeFileSync(join(sourceDir, "reme", "core", "__init__.py"), "from .schema import MemoryNode\n");
+    writeFileSync(join(sourceDir, "reme", "core", "schema", "__init__.py"), "from .memory_node import MemoryNode\n");
+    writeFileSync(
+      join(sourceDir, "reme", "core", "schema", "memory_node.py"),
+      "class MemoryNode:\n    pass\n",
+    );
+    writeFileSync(
+      join(sourceDir, "reme", "app.py"),
+      `import sys
+from pathlib import Path
+from .core.schema.memory_node import MemoryNode
+from pydantic import BaseModel
+
+class App(BaseModel):
+  node: MemoryNode
+
+  def run(self):
+    return self.node
+
+print(Path('.'))
+`,
+    );
+
+    const config = ConfigSchema.parse({
+      sources: [{ path: sourceDir }],
+      dataDir: join(tmp.path, "data"),
+      embedding: {
+        provider: "local",
+        localBackend: "mock",
+        dimensions: 768,
+      },
+    });
+
+    const engine = await ContextEngine.create(config);
+    await engine.index();
+
+    const deps = await engine.getDependencies("reme/app.py");
+    expect(deps).toContain("Dependencies for reme/app.py (python-semantic):");
+    expect(deps).toContain("reme/core/schema/memory_node.py");
+    expect(deps).toContain("Stdlib");
+    expect(deps).toContain("sys");
+    expect(deps).toContain("pathlib");
+    expect(deps).toContain("pydantic");
+
+    const importers = await engine.findImporters("reme/core/schema/memory_node.py");
+    expect(importers).toContain("reme/app.py");
+    expect(importers).toContain("reme/core/schema/__init__.py");
+
+    const status = await engine.status();
+    expect(status.capabilities?.pyDependencies).toBe("tree-sitter-resolver");
+    expect((status.pyDependencyGraph?.filesIndexed ?? 0) > 0).toBe(true);
+
+    const methodSymbols = await engine.getSymbols({ name: "run", kind: "method", limit: 10 });
+    expect(methodSymbols.some((entry) => entry.filePath.endsWith("reme/app.py"))).toBe(true);
+
+    await engine.close();
+  });
+
+  it("handles namespace package imports (PEP 420) and multiline __all__", async () => {
+    const tmp = TempDir.create("ce-engine-py-namespace");
+    dirs.push(tmp);
+
+    const sourceDir = join(tmp.path, "repo", "src");
+    mkdirSync(join(sourceDir, "ns_pkg", "tools"), { recursive: true });
+
+    writeFileSync(
+      join(sourceDir, "ns_pkg", "tools", "util.py"),
+      `VALUE = 1
+__all__ = [
+  "VALUE",
+]
+`,
+    );
+
+    writeFileSync(
+      join(sourceDir, "ns_pkg", "app.py"),
+      `from ns_pkg import tools
+from ns_pkg.tools import util
+import ns_pkg.tools.util
+`,
+    );
+
+    const config = ConfigSchema.parse({
+      sources: [{ path: sourceDir }],
+      dataDir: join(tmp.path, "data"),
+      embedding: {
+        provider: "local",
+        localBackend: "mock",
+        dimensions: 768,
+      },
+    });
+
+    const engine = await ContextEngine.create(config);
+    await engine.index();
+
+    const deps = await engine.getDependencies("ns_pkg/app.py");
+    expect(deps).toContain("Dependencies for ns_pkg/app.py (python-semantic):");
+    expect(deps).toContain("ns_pkg/tools");
+    expect(deps).toContain("ns_pkg/tools/util.py");
+    expect(deps).toContain("Internal");
+
+    const importers = await engine.findImporters("ns_pkg/tools");
+    expect(importers).toContain("ns_pkg/app.py");
+
+    const summary = await engine.getFileSummary("ns_pkg/tools/util.py");
+    expect(summary).toContain("variable __all__");
+
+    await engine.close();
+  });
+
+  it("resolves sys.path-assisted imports and flags conditional imports", async () => {
+    const tmp = TempDir.create("ce-engine-py-syspath");
+    dirs.push(tmp);
+
+    const sourceDir = join(tmp.path, "repo", "src");
+    mkdirSync(join(sourceDir, "lib"), { recursive: true });
+    mkdirSync(join(sourceDir, "scripts"), { recursive: true });
+
+    writeFileSync(join(sourceDir, "lib", "helpers.py"), "VALUE = 1\n");
+    writeFileSync(
+      join(sourceDir, "scripts", "main.py"),
+      `import sys
+sys.path.append("../lib")
+
+try:
+  import uvloop
+except ImportError:
+  import asyncio
+
+import helpers
+`,
+    );
+
+    const config = ConfigSchema.parse({
+      sources: [{ path: sourceDir }],
+      dataDir: join(tmp.path, "data"),
+      embedding: {
+        provider: "local",
+        localBackend: "mock",
+        dimensions: 768,
+      },
+    });
+
+    const engine = await ContextEngine.create(config);
+    await engine.index();
+
+    const deps = await engine.getDependencies("scripts/main.py");
+    expect(deps).toContain("lib/helpers.py");
+    expect(deps).toContain("conditional import context");
+
+    await engine.close();
+  });
+
+  it("filters self/non-code importer noise by default", async () => {
+    const tmp = TempDir.create("ce-engine-importer-noise");
+    dirs.push(tmp);
+
+    const sourceDir = join(tmp.path, "repo", "src");
+    mkdirSync(join(sourceDir, "pkg"), { recursive: true });
+
+    writeFileSync(join(sourceDir, "pkg", "__init__.py"), "from .core import Core\n");
+    writeFileSync(join(sourceDir, "pkg", "core.py"), "class Core: pass\n");
+    writeFileSync(join(sourceDir, "README.md"), "from pkg import Core\n");
+
+    const config = ConfigSchema.parse({
+      sources: [{ path: sourceDir }],
+      dataDir: join(tmp.path, "data"),
+      embedding: {
+        provider: "local",
+        localBackend: "mock",
+        dimensions: 768,
+      },
+    });
+
+    const engine = await ContextEngine.create(config);
+    await engine.index();
+
+    const importers = await engine.findImporters("pkg/__init__.py");
+    expect(importers).not.toContain("\n- pkg/__init__.py");
+    expect(importers).not.toContain("\n- README.md");
+
+    await engine.close();
+  });
+
+  it("normalizes src/ prefixed paths for python importer/reference queries", async () => {
+    const tmp = TempDir.create("ce-engine-src-prefix");
+    dirs.push(tmp);
+
+    const sourceDir = join(tmp.path, "repo");
+    mkdirSync(join(sourceDir, "reme", "core", "op"), { recursive: true });
+
+    writeFileSync(join(sourceDir, "reme", "__init__.py"), "");
+    writeFileSync(join(sourceDir, "reme", "core", "__init__.py"), "");
+    writeFileSync(join(sourceDir, "reme", "core", "op", "base.py"), "class Base:\n    def execute(self):\n        return 1\n");
+    writeFileSync(join(sourceDir, "reme", "core", "op", "impl.py"), "from .base import Base\nclass Impl(Base):\n    def execute(self):\n        return 2\n");
+
+    const config = ConfigSchema.parse({
+      sources: [{ path: sourceDir }],
+      dataDir: join(tmp.path, "data"),
+      embedding: {
+        provider: "local",
+        localBackend: "mock",
+        dimensions: 768,
+      },
+      python: {
+        referencesBackend: "static",
+      },
+    });
+
+    const engine = await ContextEngine.create(config);
+    await engine.index();
+
+    const importers = await engine.findImporters("src/reme/core/op/base.py");
+    expect(importers).toContain("reme/core/op/impl.py");
+
+    const refs = await engine.findReferences("execute", {
+      filePath: "src/reme/core/op/base.py",
+      limit: 10,
+    });
+    expect(refs).not.toContain("Python file not found on disk");
+    expect(refs).toContain("reme/core/op/impl.py");
+
+    const missingImporters = await engine.findImporters("src/reme/core/op/implx.py");
+    expect(missingImporters).toContain("Hint: Did you mean");
+
+    await engine.close();
+  });
+
   it("hydrates TS dependency graph from existing metadata on restart", async () => {
     const tmp = TempDir.create("ce-engine-ts-hydrate");
     dirs.push(tmp);

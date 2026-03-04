@@ -49,8 +49,44 @@ def authenticate_user(email, password):
     const symbols = chunks.map((c) => `${c.symbolKind}:${c.symbolName}`);
 
     expect(symbols).toContain("class:SessionManager");
-    expect(symbols).toContain("function:create_session");
+    expect(symbols).toContain("method:create_session");
     expect(symbols).toContain("function:authenticate_user");
+
+    const method = chunks.find((c) => c.symbolKind === "method" && c.symbolName === "create_session");
+    expect(method?.parentSymbol).toBe("SessionManager");
+  });
+
+  it("captures Python decorators and module-level constants", () => {
+    const chunker = new AstChunker({ preferTreeSitter: false });
+    const source = `
+@decorator
+class SessionManager:
+    @staticmethod
+    def create_session(user_id):
+        return {"user_id": user_id}
+
+API_VERSION = "v1"
+__all__ = [
+  "SessionManager",
+  "API_VERSION",
+]
+`;
+
+    const chunks = chunker.chunk(source, "src/auth.py", "python", "repo1");
+
+    const classChunk = chunks.find((c) => c.symbolKind === "class" && c.symbolName === "SessionManager");
+    expect(classChunk?.content.startsWith("@decorator")).toBe(true);
+
+    const methodChunk = chunks.find((c) => c.symbolKind === "method" && c.symbolName === "create_session");
+    expect(methodChunk?.content.startsWith("@staticmethod")).toBe(true);
+    expect(methodChunk?.parentSymbol).toBe("SessionManager");
+
+    expect(chunks.some((c) => c.symbolKind === "variable" && c.symbolName === "API_VERSION")).toBe(true);
+
+    const allChunk = chunks.find((c) => c.symbolKind === "variable" && c.symbolName === "__all__");
+    expect(!!allChunk).toBe(true);
+    expect((allChunk?.endLine ?? 0) > (allChunk?.startLine ?? 0)).toBe(true);
+    expect(allChunk?.content).toContain("API_VERSION");
   });
 
   it("extracts Go symbols", () => {

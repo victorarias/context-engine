@@ -7,8 +7,9 @@
     "content": "class SessionManager:\n    def create_session(self, user_id):\n        return {\"user_id\": user_id}"
   },
   {
-    "symbolKind": "function",
+    "symbolKind": "method",
     "symbolName": "create_session",
+    "parentSymbol": "SessionManager",
     "startLine": 2,
     "endLine": 4,
     "content": "def create_session(self, user_id):\n        return {\"user_id\": user_id}"

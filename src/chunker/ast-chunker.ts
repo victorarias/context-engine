@@ -94,11 +94,12 @@ export class AstChunker implements Chunker {
         const info = extractTreeSitterSymbol(node, language);
         if (!info) continue;
 
-        const snippet = node.text?.trim();
+        const snippetNode = nodeForChunkContent(node, language);
+        const snippet = snippetNode.text?.trim();
         if (!snippet) continue;
 
-        const startLine = node.startPosition.row + 1;
-        const endLine = node.endPosition.row + 1;
+        const startLine = snippetNode.startPosition.row + 1;
+        const endLine = snippetNode.endPosition.row + 1;
 
         chunks.push({
           id: makeChunkId(filePath, startLine, endLine, snippet, info.symbolName, info.symbolKind),
@@ -201,22 +202,66 @@ export class AstChunker implements Chunker {
   private chunkPython(content: string, filePath: string, repoId: string): Chunk[] {
     const lines = content.split(/\r?\n/);
     const chunks: Chunk[] = [];
+    const classStack: Array<{ indent: number; name: string }> = [];
 
     for (let i = 0; i < lines.length; i++) {
-      const line = lines[i];
+      const line = lines[i] ?? "";
+      const trimmed = line.trim();
+      const baseIndent = indentation(line);
+
+      if (trimmed && !trimmed.startsWith("#")) {
+        while (classStack.length > 0 && baseIndent <= classStack[classStack.length - 1]!.indent) {
+          classStack.pop();
+        }
+      }
+
       const classMatch = line.match(/^\s*class\s+([A-Za-z_][A-Za-z0-9_]*)\s*[(:]/);
       const fnMatch = line.match(/^\s*def\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(/);
+      const constMatch = line.match(/^([A-Z][A-Z0-9_]*)(?:\s*:\s*[^=]+)?\s*=/);
+      const allMatch = line.match(/^(__all__)(?:\s*:\s*[^=]+)?\s*=/);
+
+      if (!classMatch && !fnMatch && !constMatch && !allMatch) continue;
+
+      if ((constMatch || allMatch) && baseIndent === 0) {
+        const symbolName = allMatch?.[1] ?? constMatch?.[1] ?? "unknown";
+        const symbolKind: SymbolKind = "variable";
+
+        const range = allMatch
+          ? findPythonAssignmentRange(lines, i, baseIndent)
+          : { start: i, end: i };
+
+        const snippet = lines.slice(range.start, range.end + 1).join("\n").trim();
+        if (!snippet) continue;
+
+        const startLine = range.start + 1;
+        const endLine = range.end + 1;
+        chunks.push({
+          id: makeChunkId(filePath, startLine, endLine, snippet, symbolName, symbolKind),
+          content: snippet,
+          filePath,
+          startLine,
+          endLine,
+          language: "python",
+          repoId,
+          symbolName,
+          symbolKind,
+        });
+        continue;
+      }
 
       if (!classMatch && !fnMatch) continue;
 
       const symbolName = classMatch?.[1] ?? fnMatch?.[1] ?? "unknown";
-      const symbolKind: SymbolKind = classMatch ? "class" : "function";
+      const symbolKind: SymbolKind = classMatch
+        ? "class"
+        : (classStack.length > 0 && baseIndent > classStack[classStack.length - 1]!.indent ? "method" : "function");
 
-      const baseIndent = indentation(line);
+      const parentSymbol = symbolKind === "method" ? classStack[classStack.length - 1]?.name : undefined;
+      const start = findDecoratorStart(lines, i, baseIndent);
       let end = i;
 
       for (let j = i + 1; j < lines.length; j++) {
-        const candidate = lines[j];
+        const candidate = lines[j] ?? "";
         if (!candidate.trim()) {
           end = j;
           continue;
@@ -229,10 +274,10 @@ export class AstChunker implements Chunker {
         end = j;
       }
 
-      const snippet = lines.slice(i, end + 1).join("\n").trim();
+      const snippet = lines.slice(start, end + 1).join("\n").trim();
       if (!snippet) continue;
 
-      const startLine = i + 1;
+      const startLine = start + 1;
       const endLine = end + 1;
 
       chunks.push({
@@ -245,7 +290,12 @@ export class AstChunker implements Chunker {
         repoId,
         symbolName,
         symbolKind,
+        parentSymbol,
       });
+
+      if (classMatch) {
+        classStack.push({ indent: baseIndent, name: symbolName });
+      }
     }
 
     return dedupeChunks(chunks);
@@ -430,7 +480,7 @@ function nodeTypesForLanguage(language: TreeSitterLanguage): string[] {
     case "javascript":
       return ["function_declaration", "class_declaration", "method_definition"];
     case "python":
-      return ["function_definition", "class_definition"];
+      return ["decorated_definition", "function_definition", "class_definition", "assignment"];
     case "go":
       return ["function_declaration", "method_declaration", "type_spec"];
     case "rust":
@@ -446,8 +496,7 @@ function extractTreeSitterSymbol(
 ): { symbolName: string; symbolKind: SymbolKind; parentSymbol?: string } | null {
   switch (language) {
     case "typescript":
-    case "javascript":
-    case "python": {
+    case "javascript": {
       const symbolKind = symbolKindFromNodeType(node.type);
       if (!symbolKind) return null;
 
@@ -460,6 +509,10 @@ function extractTreeSitterSymbol(
         symbolKind,
         parentSymbol: symbolKind === "method" ? findNearestClassName(node.parent) : undefined,
       };
+    }
+
+    case "python": {
+      return extractPythonTreeSitterSymbol(node);
     }
 
     case "go": {
@@ -636,6 +689,89 @@ function findNearestAncestor(node: any, type: string): any | null {
   return null;
 }
 
+function nodeForChunkContent(node: any, language: TreeSitterLanguage): any {
+  if (language === "python" && (node.type === "class_definition" || node.type === "function_definition")) {
+    if (node.parent?.type === "decorated_definition") {
+      return node.parent;
+    }
+  }
+
+  return node;
+}
+
+function extractPythonTreeSitterSymbol(
+  node: any,
+): { symbolName: string; symbolKind: SymbolKind; parentSymbol?: string } | null {
+  if (!node) return null;
+
+  if (node.type === "decorated_definition") {
+    const decorated = node.childForFieldName?.("definition")
+      ?? node.childForFieldName?.("body")
+      ?? firstChildByTypes(node, ["function_definition", "class_definition"]);
+
+    if (!decorated) return null;
+
+    return extractPythonTreeSitterSymbol(decorated);
+  }
+
+  if (node.type === "assignment") {
+    const parentExpr = node.parent?.type === "expression_statement" ? node.parent : null;
+    const isModuleLevel = parentExpr?.parent?.type === "module";
+    if (!isModuleLevel) return null;
+
+    const lhs = node.child(0);
+    if (!lhs || lhs.type !== "identifier") return null;
+
+    const symbolName = lhs.text?.trim();
+    if (!symbolName) return null;
+
+    if (symbolName !== "__all__" && !/^[A-Z][A-Z0-9_]*$/.test(symbolName)) {
+      return null;
+    }
+
+    return {
+      symbolName,
+      symbolKind: "variable",
+    };
+  }
+
+  const baseKind = symbolKindFromNodeType(node.type);
+  if (!baseKind) return null;
+
+  const nameNode = node.childForFieldName("name");
+  const symbolName = nameNode?.text?.trim();
+  if (!symbolName) return null;
+
+  if (baseKind === "function") {
+    const parentClass = findNearestAncestor(node.parent, "class_definition");
+    if (parentClass) {
+      const className = parentClass.childForFieldName("name")?.text?.trim();
+      return {
+        symbolName,
+        symbolKind: "method",
+        parentSymbol: className || undefined,
+      };
+    }
+  }
+
+  return {
+    symbolName,
+    symbolKind: baseKind,
+  };
+}
+
+function firstChildByTypes(node: any, types: string[]): any | null {
+  if (!node) return null;
+
+  for (let i = 0; i < node.childCount; i++) {
+    const child = node.child(i);
+    if (!child) continue;
+    if (types.includes(child.type)) return child;
+  }
+
+  return null;
+}
+
 function isTreeSitterLanguage(lang: string): lang is TreeSitterLanguage {
   return lang === "typescript" || lang === "javascript" || lang === "python" || lang === "go" || lang === "rust" || lang === "kotlin";
 }
@@ -664,6 +800,73 @@ function makeChunkId(
     .slice(0, 16);
 
   return `${filePath}:${startLine}-${endLine}:${symbolKind}:${symbolName}:${hash}`;
+}
+
+function findDecoratorStart(lines: string[], declarationLineIndex: number, declarationIndent: number): number {
+  let start = declarationLineIndex;
+
+  for (let i = declarationLineIndex - 1; i >= 0; i--) {
+    const candidate = lines[i] ?? "";
+    if (!candidate.trim()) {
+      continue;
+    }
+
+    if (indentation(candidate) !== declarationIndent) {
+      break;
+    }
+
+    if (candidate.trimStart().startsWith("@")) {
+      start = i;
+      continue;
+    }
+
+    break;
+  }
+
+  return start;
+}
+
+function findPythonAssignmentRange(
+  lines: string[],
+  startIndex: number,
+  assignmentIndent: number,
+): { start: number; end: number } {
+  let end = startIndex;
+  let balance = bracketBalance(lines[startIndex] ?? "");
+  let continuation = /\\\s*$/.test((lines[startIndex] ?? "").trimEnd());
+
+  for (let i = startIndex + 1; i < lines.length; i++) {
+    const line = lines[i] ?? "";
+    const trimmed = line.trim();
+
+    if (!trimmed) {
+      end = i;
+      continue;
+    }
+
+    const indent = indentation(line);
+
+    if (balance <= 0 && !continuation && indent <= assignmentIndent) {
+      break;
+    }
+
+    end = i;
+    balance += bracketBalance(line);
+    continuation = /\\\s*$/.test(trimmed);
+  }
+
+  return { start: startIndex, end };
+}
+
+function bracketBalance(line: string): number {
+  let delta = 0;
+
+  for (const ch of line) {
+    if (ch === "[" || ch === "(" || ch === "{") delta += 1;
+    if (ch === "]" || ch === ")" || ch === "}") delta -= 1;
+  }
+
+  return delta;
 }
 
 function indentation(line: string): number {

@@ -206,6 +206,8 @@ export interface EngineStatus {
     goDependencies?: "native";
     tsDependencies?: "compiler-api";
     tsReferences?: "compiler-api";
+    pyDependencies?: "tree-sitter-resolver";
+    pyReferences?: "heuristic" | "python-static" | "python-jedi" | "hybrid";
   };
   tsDependencyGraph?: {
     filesIndexed: number;
@@ -217,6 +219,29 @@ export interface EngineStatus {
     programCacheHits: number;
     programCacheMisses: number;
     cachedPrograms: number;
+  };
+  pyDependencyGraph?: {
+    filesIndexed: number;
+    edgesTotal: number;
+    edgesResolved: number;
+    edgesUnresolved: number;
+    resolutionSuccessRate: number;
+    internalEdgesTotal: number;
+    internalEdgesResolved: number;
+    internalResolutionRate: number;
+    stdlibEdges: number;
+    externalEdges: number;
+    aliasResolvedEdges: number;
+    lastBuiltAt: number;
+    parserReady: boolean;
+  };
+  pyReferenceBackends?: {
+    pythonJedi: number;
+    pythonStatic: number;
+    heuristic: number;
+    none: number;
+    semanticUsageRate: number;
+    fallbackRate: number;
   };
   queryLatencyMs?: {
     getDependencies: { count: number; p50: number; p95: number };

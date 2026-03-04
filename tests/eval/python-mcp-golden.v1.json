@@ -1,0 +1,56 @@
+{
+  "checks": [
+    {
+      "id": "deps-base",
+      "tool": "get_dependencies",
+      "args": { "filePath": "pkg/base.py" },
+      "contains": [
+        "Dependencies for pkg/base.py (python-semantic):",
+        "- Internal (1):",
+        "- Stdlib (1):",
+        "pkg/helpers.py",
+        "os"
+      ],
+      "notContains": [
+        "notes.md"
+      ]
+    },
+    {
+      "id": "importers-base",
+      "tool": "find_importers",
+      "args": { "target": "pkg/base.py", "limit": 20 },
+      "contains": [
+        "Importers for pkg/base.py:",
+        "- pkg/api.py",
+        "- pkg/impl.py",
+        "- pkg/runner.py"
+      ],
+      "notContains": [
+        "\n- pkg/base.py",
+        "\n- pkg/notes.md"
+      ]
+    },
+    {
+      "id": "refs-execute",
+      "tool": "find_references",
+      "args": { "symbol": "execute", "filePath": "pkg/base.py", "limit": 20 },
+      "contains": [
+        "Requested backend: python-static",
+        "Actual backend: python-static",
+        "pkg/runner.py",
+        "pkg/impl.py",
+        "[override]"
+      ],
+      "notContains": [
+        "pkg/notes.md"
+      ]
+    },
+    {
+      "id": "symbols-init",
+      "tool": "get_symbols",
+      "args": { "filePath": "pkg/__init__.py", "limit": 20 },
+      "containsSymbols": ["BaseOp", "ChildOp", "__all__"],
+      "containsKinds": ["module", "variable"]
+    }
+  ]
+}
