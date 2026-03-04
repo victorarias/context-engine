@@ -20,7 +20,6 @@ export function isGitRepository(path: string): boolean {
 export function detectGitWorktree(path: string): WorktreeInfo | null {
   if (!isGitRepository(path)) return null;
 
-  const absPath = resolve(path);
   const root = runGit(path, ["rev-parse", "--show-toplevel"]);
   const gitCommonDirRaw = runGit(path, ["rev-parse", "--git-common-dir"]);
   const gitCommonDir = resolve(root, gitCommonDirRaw);
@@ -31,10 +30,12 @@ export function detectGitWorktree(path: string): WorktreeInfo | null {
     ? branchRef.slice("refs/heads/".length)
     : branchRef;
 
+  // Use git's toplevel as canonical path — it resolves symlinks consistently
+  // with what `git worktree list --porcelain` returns.
   return {
-    worktreeId: makeWorktreeId(absPath),
+    worktreeId: makeWorktreeId(root),
     repoId: makeRepoId(gitCommonDir),
-    path: absPath,
+    path: root,
     branch,
     isMain: !gitDir.includes("/worktrees/"),
     gitCommonDir,

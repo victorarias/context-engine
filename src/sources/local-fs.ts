@@ -4,7 +4,12 @@ import { resolve, extname } from "node:path";
 import type { FileInfo, SourceScanner, ScanOptions } from "../types.js";
 import { isSecretPath } from "../storage/security.js";
 
-const DEFAULT_EXCLUDES = [
+/**
+ * Directory names to always skip during scanning and watching.
+ * Shared between LocalFileScanner and WorktreeWatcher.
+ */
+export const DEFAULT_IGNORE_DIRS = [
+  // JS / build
   "node_modules",
   ".git",
   ".next",
@@ -13,14 +18,22 @@ const DEFAULT_EXCLUDES = [
   "coverage",
   "target",
   "vendor",
+  // Python
   "__pycache__",
+  ".venv",
+  "venv",
+  ".mypy_cache",
+  ".ruff_cache",
+  ".pytest_cache",
+  ".tox",
+  // Context engine data
   ".context-engine",
 ];
 
 export class LocalFileScanner implements SourceScanner {
   async *scan(dir: string, options: ScanOptions = {}): AsyncIterable<FileInfo> {
     const root = resolve(dir);
-    const excludes = new Set([...(options.exclude ?? []).map(normalizeSimplePattern), ...DEFAULT_EXCLUDES]);
+    const excludes = new Set([...(options.exclude ?? []).map(normalizeSimplePattern), ...DEFAULT_IGNORE_DIRS]);
 
     for (const filePath of walkFiles(root, excludes)) {
       let stat;

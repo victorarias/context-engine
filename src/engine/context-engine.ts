@@ -1153,7 +1153,28 @@ export class ContextEngine implements Engine {
 
     const goResolution = await this.resolveGoReferenceTarget(query, normalizedFilePath);
     const goplsInstalled = isGoplsAvailable();
-    const shouldTryGo = goplsInstalled && (goResolution.kind !== "unresolved" || explicitGo);
+    const shouldTryGo = goResolution.kind !== "unresolved" || explicitGo;
+
+    if (shouldTryGo && !goplsInstalled) {
+      const fallback = await this.findReferencesHeuristic(query, {
+        filePath: normalizedFilePath,
+        limit,
+      });
+
+      const goplsMissing = "gopls is not installed. Install it with: go install golang.org/x/tools/gopls@latest";
+      const reason = goResolution.kind === "unresolved"
+        ? `${goResolution.reason} | ${goplsMissing}`
+        : goplsMissing;
+
+      return response({
+        symbol: query,
+        requestedBackend: "gopls",
+        actualBackend: "heuristic",
+        references: fallback,
+        fallbackReason: reason,
+        candidates: goResolution.kind !== "unresolved" ? goResolution.candidates : undefined,
+      });
+    }
 
     if (shouldTryGo) {
       if (goResolution.kind === "ambiguous") {

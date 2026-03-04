@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { relative, resolve } from "node:path";
+import { DEFAULT_IGNORE_DIRS } from "../sources/local-fs.js";
 
 export type WatchChangeKind = "added" | "modified" | "deleted";
 
@@ -19,18 +20,7 @@ export interface WorktreeWatcherOptions {
   ignorePaths?: string[];
 }
 
-const DEFAULT_IGNORE_NAMES = [
-  "node_modules",
-  ".git",
-  ".next",
-  "dist",
-  "build",
-  "coverage",
-  "target",
-  "vendor",
-  "__pycache__",
-  ".context-engine",
-];
+const DEFAULT_IGNORE_NAMES = DEFAULT_IGNORE_DIRS;
 
 interface FileEntry {
   signature: string;
