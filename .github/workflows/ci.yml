@@ -134,6 +134,8 @@ jobs:
         run: bun run build
 
       - name: Jedi backend integration gate
+        env:
+          CE_PYTHON_EXECUTABLE: python
         run: bun run test:jedi
 
       - name: Upload Jedi test logs
