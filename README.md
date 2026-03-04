@@ -8,7 +8,7 @@
   </p>
   <p align="center">
     <a href="#quick-start">Quick Start</a> ·
-    <a href="#connect-to-your-agent">Connect to Your Agent</a> ·
+    <a href="#connect-to-other-agents">Other Agents</a> ·
     <a href="#tools">Tools</a> ·
     <a href="#configuration">Configuration</a>
   </p>
@@ -36,110 +36,35 @@ It **indexes your entire codebase** — code, symbols, git history, even documen
 
 ## Quick Start
 
-### Prerequisites
+**1. Install [Bun](https://bun.sh/)** (v1.0+)
 
-- [Bun](https://bun.sh/) (v1.0+)
-
-### Install
-
-Clone Context Engine anywhere on your machine — it doesn't need to live inside your project:
+**2. Clone and install:**
 
 ```bash
-# Install it wherever you keep tools
 git clone https://github.com/victorarias/context-engine.git ~/tools/context-engine
 cd ~/tools/context-engine
 bun install
 ```
 
-### How it knows what to index
-
-Context Engine is a **standalone tool** that can index any project. There are two separate paths:
-
-- **Tool path** — where you cloned Context Engine (e.g. `~/tools/context-engine`)
-- **Project path** — the codebase you want to index (e.g. `~/projects/my-app`)
-
-You tell it which project to index in one of three ways:
+**3. Add it to your agent:**
 
 ```bash
-# 1. Pass the project path directly
-bun run ~/tools/context-engine/src/cli.ts serve ~/projects/my-app
+# Add to all your projects (recommended)
+claude mcp add -s user context-engine bun run ~/tools/context-engine/src/cli.ts serve
 
-# 2. Pass a config file inside your project
-bun run ~/tools/context-engine/src/cli.ts serve ~/projects/my-app/context-engine.json
-
-# 3. Run from your project directory (indexes cwd by default)
-cd ~/projects/my-app
-bun run ~/tools/context-engine/src/cli.ts serve
+# Or add to just the current project
+claude mcp add context-engine bun run ~/tools/context-engine/src/cli.ts serve
 ```
 
-If no config file is found, Context Engine indexes the target directory with sensible defaults (local ONNX embeddings, file watcher enabled, common directories like `node_modules` excluded).
+That's it. Next time Claude starts, Context Engine will index your project and your agent gets semantic search, symbol lookup, dependency analysis, and more.
 
-### Useful commands
-
-```bash
-# All commands accept a project path or config file as the last argument
-bun run ~/tools/context-engine/src/cli.ts serve [path]     # Start MCP server
-bun run ~/tools/context-engine/src/cli.ts index [path]     # Index without starting server
-bun run ~/tools/context-engine/src/cli.ts status           # Check index status
-bun run ~/tools/context-engine/src/cli.ts reindex          # Full rebuild
-bun run ~/tools/context-engine/src/cli.ts doctor           # Validate storage consistency
-```
+> Context Engine indexes whichever directory your agent opens (`cwd`). No config file needed — it uses sensible defaults (local ONNX embeddings, file watcher, common directories like `node_modules` excluded).
 
 ---
 
-## Connect to Your Agent
+## Connect to Other Agents
 
-Context Engine speaks MCP, so it plugs into any agent that supports MCP servers.
-
-> **Key concept:** your MCP config points to the Context Engine *tool* and tells it which *project* to index. You can do this via `cwd` (the agent runs the server from your project directory) or by passing the project path explicitly.
-
-### Claude Code (Claude CLI)
-
-**Option A — project-level `.mcp.json`** (recommended)
-
-Create a `.mcp.json` in your project root (`~/projects/my-app/.mcp.json`):
-
-```json
-{
-  "mcpServers": {
-    "context-engine": {
-      "command": "bun",
-      "args": ["run", "/home/you/tools/context-engine/src/cli.ts", "serve"]
-    }
-  }
-}
-```
-
-When Claude opens this project, `cwd` is automatically set to the project root, so Context Engine indexes it.
-
-**Option B — global config with explicit project path**
-
-Add to `~/.claude/claude_desktop_config.json`:
-
-```json
-{
-  "mcpServers": {
-    "context-engine": {
-      "command": "bun",
-      "args": ["run", "/home/you/tools/context-engine/src/cli.ts", "serve", "/home/you/projects/my-app"]
-    }
-  }
-}
-```
-
-**Option C — global config with `cwd`**
-
-```json
-{
-  "mcpServers": {
-    "context-engine": {
-      "command": "bun",
-      "args": ["run", "/home/you/tools/context-engine/src/cli.ts", "serve"],
-      "cwd": "/home/you/projects/my-app"
-    }
-  }
-}
-```
+The Quick Start above covers Claude Code. Here's how to connect other MCP clients.
 
 ### Cursor
 
@@ -174,6 +99,23 @@ Add to your Zed settings (`~/.config/zed/settings.json`):
   }
 }
 ```
+
+### Project-level `.mcp.json`
+
+To share Context Engine config with your team, create a `.mcp.json` in your project root:
+
+```json
+{
+  "mcpServers": {
+    "context-engine": {
+      "command": "bun",
+      "args": ["run", "/home/you/tools/context-engine/src/cli.ts", "serve"]
+    }
+  }
+}
+```
+
+Works with Claude Code, Cursor, and other agents that read `.mcp.json`.
 
 ### HTTP Mode
 
@@ -298,6 +240,20 @@ Vertex auth: set `VERTEX_ACCESS_TOKEN`, or `GOOGLE_APPLICATION_CREDENTIALS`, or 
 ### Storage
 
 By default, index data lives in `~/.context-engine/<repo-hash>/` — no `.context-engine` folder cluttering your repo. You can override this with `"dataDir": "./my-index"` in the config.
+
+### CLI Commands
+
+Most users don't need these — the MCP server handles indexing automatically. But they're useful for debugging or manual maintenance:
+
+```bash
+bun run ~/tools/context-engine/src/cli.ts serve [path]     # Start MCP server (used by agents)
+bun run ~/tools/context-engine/src/cli.ts index [path]     # Index without starting server
+bun run ~/tools/context-engine/src/cli.ts status [path]    # Check index status
+bun run ~/tools/context-engine/src/cli.ts reindex [path]   # Full rebuild
+bun run ~/tools/context-engine/src/cli.ts doctor [path]    # Validate storage consistency
+```
+
+All commands accept a project path or config file as the last argument.
 
 ### Supported Languages (AST Chunking)
 
