@@ -1,5 +1,4 @@
-import { createHash } from "node:crypto";
-import { readFileSync, readdirSync, statSync } from "node:fs";
+import { readdirSync, statSync } from "node:fs";
 import { relative, resolve } from "node:path";
 import { DEFAULT_IGNORE_DIRS } from "../sources/local-fs.js";
 
@@ -229,17 +228,9 @@ function walk(
       continue;
     }
 
-    let contentHash = "";
-    try {
-      const content = readFileSync(fullPath);
-      contentHash = createHash("sha1").update(content).digest("hex");
-    } catch {
-      continue;
-    }
-
     const rel = normalizePath(relative(context.root, fullPath));
     context.out.set(rel, {
-      signature: `${stat.size}:${contentHash}`,
+      signature: `${stat.mtimeMs}:${stat.size}`,
     });
   }
 }

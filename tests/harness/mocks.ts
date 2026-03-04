@@ -91,6 +91,10 @@ export class MockVectorStore implements VectorStore {
     return this.entries.size;
   }
 
+  async optimize(): Promise<void> {
+    // no-op for mock
+  }
+
   async close(): Promise<void> {
     this.entries.clear();
   }

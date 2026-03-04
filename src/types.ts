@@ -118,6 +118,7 @@ export interface VectorStore {
   ): Promise<VectorSearchResult[]>;
   delete(chunkIds: string[]): Promise<void>;
   count(): Promise<number>;
+  optimize(): Promise<void>;
   close(): Promise<void>;
 }
 

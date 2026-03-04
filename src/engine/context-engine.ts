@@ -1,6 +1,6 @@
-import { readFileSync, existsSync, statSync } from "node:fs";
-import { execFileSync } from "node:child_process";
-import { basename, dirname, extname, relative, resolve } from "node:path";
+import { readFileSync, existsSync, statSync, writeFileSync, unlinkSync } from "node:fs";
+import { execFileSync, spawn } from "node:child_process";
+import { basename, dirname, extname, join, relative, resolve } from "node:path";
 import type { Config } from "../config.js";
 import type { Engine } from "./engine.js";
 import type { Chunk, EngineStatus, SearchResult, SymbolInfo } from "../types.js";
@@ -23,6 +23,7 @@ import {
   SQLiteMetadataStore,
   WriteAheadLog,
   normalizePathForLookup,
+  type ChunkRow,
 } from "../storage/index.js";
 import { logError, logEvent } from "../observability/logger.js";
 
@@ -1682,6 +1683,10 @@ export class ContextEngine implements Engine {
         const manifestMap = new Map(manifestEntries.map((entry) => [entry.path, entry.blobHash]));
         const dirtyPaths = context.isGit ? getDirtyPaths(root) : new Set<string>();
 
+        // Accumulate vector rows for bulk write (direct or subprocess).
+        const accumulatedRows: ChunkRow[] = [];
+        const blobsToCleanup = new Set<string>();
+
         if (context.isGit) {
           await this.metadataStore.clearTreeEntries(worktreeId);
           for (const entry of manifestEntries) {
@@ -1757,11 +1762,24 @@ export class ContextEngine implements Engine {
             chunkIds = chunks.map((chunk) => chunk.id);
             symbolChunks = chunks;
 
-            const writeId = await this.writeLog.beginIntent("upsert", chunkIds);
-            await this.vectorStore.upsert(await this.embedChunks(chunks), chunks);
-            await this.writeLog.markLanceOk(writeId);
-            await this.writeLog.markSqliteOk(writeId);
-            await this.writeLog.finalize(writeId);
+            const vectors = await this.embedChunks(chunks);
+            for (let i = 0; i < chunks.length; i++) {
+              const chunk = chunks[i];
+              accumulatedRows.push({
+                id: chunk.id,
+                vector: Array.from(vectors[i]),
+                content: chunk.content,
+                filePath: chunk.filePath,
+                startLine: chunk.startLine,
+                endLine: chunk.endLine,
+                symbolName: chunk.symbolName ?? "",
+                symbolKind: chunk.symbolKind ?? "",
+                language: chunk.language,
+                repoId: chunk.repoId,
+                worktreeId: chunk.worktreeId ?? "default-worktree",
+                blobHash: chunk.blobHash ?? "",
+              });
+            }
           }
 
           await this.metadataStore.upsertBlob(file.contentHash, chunkIds);
@@ -1793,8 +1811,24 @@ export class ContextEngine implements Engine {
           }
 
           if (previousHash && previousHash !== file.contentHash) {
-            await this.cleanupBlobIfUnreferenced(previousHash);
+            blobsToCleanup.add(previousHash);
           }
+        }
+
+        // Phase 2: dispatch accumulated vector rows
+        if (accumulatedRows.length > 0) {
+          const allChunkIds = accumulatedRows.map((r) => r.id);
+          const writeId = await this.writeLog.beginIntent("upsert", allChunkIds);
+          await this.writeLog.markSqliteOk(writeId);
+
+          if (accumulatedRows.length >= 100) {
+            await this.writeVectorsViaSubprocess(accumulatedRows);
+          } else {
+            await this.writeVectorsDirect(accumulatedRows);
+          }
+
+          await this.writeLog.markLanceOk(writeId);
+          await this.writeLog.finalize(writeId);
         }
 
         // deleted files
@@ -1815,7 +1849,7 @@ export class ContextEngine implements Engine {
             await this.metadataStore.deleteTreeEntry(worktreeId, filePath);
             await this.metadataStore.setIndexState(this.fileHashKey(worktreeId, filePath), "");
             await this.metadataStore.deleteSymbolsByFile(filePath);
-            await this.cleanupBlobIfUnreferenced(blobHash);
+            blobsToCleanup.add(blobHash);
           }
         }
 
@@ -1834,8 +1868,13 @@ export class ContextEngine implements Engine {
             }
 
             await this.metadataStore.deleteDirtyFile(worktreeId, path);
-            await this.cleanupBlobIfUnreferenced(entry.contentHash);
+            blobsToCleanup.add(entry.contentHash);
           }
+        }
+
+        // Phase 3: process deferred blob cleanup deletes
+        for (const blobHash of blobsToCleanup) {
+          await this.cleanupBlobIfUnreferenced(blobHash);
         }
       }
 
@@ -1852,6 +1891,10 @@ export class ContextEngine implements Engine {
       });
       await this.metadataStore.setIndexState("engine:symbolSchemaVersion", SYMBOL_SCHEMA_VERSION);
       await this.metadataStore.setIndexState("engine:lastIndexedAt", String(Date.now()));
+
+      if (changedFiles > 0) {
+        await this.vectorStore.optimize();
+      }
 
       logEvent("info", "engine.index.complete", {
         roots,
@@ -2074,6 +2117,42 @@ export class ContextEngine implements Engine {
         // Keep indexing resilient; docs can be transiently unavailable.
       }
     }
+  }
+
+  /** Write vector rows via a subprocess so native allocator memory is freed on exit. */
+  private async writeVectorsViaSubprocess(rows: ChunkRow[]): Promise<void> {
+    const tempPath = join(this.config.dataDir, `_lance_rows_${Date.now()}.ndjson`);
+    const ndjson = rows.map((r) => JSON.stringify(r)).join("\n") + "\n";
+    writeFileSync(tempPath, ndjson);
+
+    await this.vectorStore.close();
+
+    const workerPath = resolve(dirname(new URL(import.meta.url).pathname), "lance-write-worker.ts");
+    const uri = resolve(this.config.dataDir, "lancedb");
+
+    await new Promise<void>((ok, fail) => {
+      const child = spawn(
+        process.execPath,
+        [workerPath, uri, String(this.embedder.dimensions), "chunks", tempPath],
+        { stdio: ["ignore", "pipe", "pipe"] },
+      );
+
+      let stderr = "";
+      child.stderr.on("data", (data: Buffer) => { stderr += data.toString(); });
+      child.on("error", fail);
+      child.on("close", (code) => {
+        if (code === 0) ok();
+        else fail(new Error(`lance-write-worker exited with code ${code}: ${stderr}`));
+      });
+    });
+  }
+
+  /** Write vector rows directly (for small batches where subprocess overhead isn't worth it). */
+  private async writeVectorsDirect(rows: ChunkRow[]): Promise<void> {
+    for (const row of rows) {
+      this.vectorStore.bufferAddRaw(row);
+    }
+    await this.vectorStore.flushBuffer();
   }
 
   private async embedChunks(chunks: Chunk[]): Promise<Float32Array[]> {

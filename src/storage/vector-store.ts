@@ -1,6 +1,7 @@
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import * as lancedb from "@lancedb/lancedb";
+import { Session } from "@lancedb/lancedb";
 import type { Connection, Table } from "@lancedb/lancedb";
 import type {
   Chunk,
@@ -18,7 +19,7 @@ export interface LanceVectorStoreOptions {
   vectorDimensions?: number;
 }
 
-interface ChunkRow {
+export interface ChunkRow {
   id: string;
   vector: number[];
   content: string;
@@ -42,6 +43,7 @@ export class LanceVectorStore implements VectorStore {
   private readonly options: Required<LanceVectorStoreOptions>;
   private connection: Connection | null = null;
   private table: Table | null = null;
+  private pendingRows: ChunkRow[] = [];
 
   constructor(options: LanceVectorStoreOptions) {
     this.options = {
@@ -80,6 +82,44 @@ export class LanceVectorStore implements VectorStore {
     }));
 
     await table.add(rows, { mode: "append" });
+  }
+
+  /** Buffer rows for a later flushBuffer() call. No delete — caller must ensure no duplicates. */
+  bufferAdd(vectors: Float32Array[], chunks: Chunk[]): void {
+    for (let i = 0; i < chunks.length; i++) {
+      const chunk = chunks[i];
+      this.pendingRows.push({
+        id: chunk.id,
+        vector: Array.from(vectors[i]),
+        content: chunk.content,
+        filePath: chunk.filePath,
+        startLine: chunk.startLine,
+        endLine: chunk.endLine,
+        symbolName: chunk.symbolName ?? "",
+        symbolKind: chunk.symbolKind ?? "",
+        language: chunk.language,
+        repoId: chunk.repoId,
+        worktreeId: chunk.worktreeId ?? "default-worktree",
+        blobHash: chunk.blobHash ?? "",
+      });
+    }
+  }
+
+  /** Push a pre-built ChunkRow directly into the pending buffer. */
+  bufferAddRaw(row: ChunkRow): void {
+    this.pendingRows.push(row);
+  }
+
+  /** Flush all buffered rows as a single table.add(). Returns chunk IDs written. */
+  async flushBuffer(): Promise<string[]> {
+    if (this.pendingRows.length === 0) return [];
+
+    const rows = this.pendingRows;
+    this.pendingRows = [];
+
+    const table = await this.getTable();
+    await table.add(rows, { mode: "append" });
+    return rows.map((r) => r.id);
   }
 
   async search(query: Float32Array, options: VectorSearchOptions): Promise<VectorSearchResult[]> {
@@ -140,6 +180,18 @@ export class LanceVectorStore implements VectorStore {
     return rows.map((row) => row.id);
   }
 
+  async optimize(): Promise<void> {
+    if (!this.table) return;
+    await this.table.optimize({ cleanupOlderThan: new Date() });
+
+    // Close and reopen to release native memory held by the Rust allocator
+    // for the now-compacted fragments.
+    this.table.close();
+    this.table = null;
+    this.connection?.close();
+    this.connection = null;
+  }
+
   async close(): Promise<void> {
     this.table?.close();
     this.table = null;
@@ -152,7 +204,11 @@ export class LanceVectorStore implements VectorStore {
     if (this.table) return this.table;
 
     mkdirSync(dirname(this.options.uri), { recursive: true });
-    this.connection = await lancedb.connect(this.options.uri);
+    const session = new Session(
+      BigInt(64 * 1024 * 1024),  // 64 MB index cache (default 6 GB)
+      BigInt(32 * 1024 * 1024),  // 32 MB metadata cache (default 1 GB)
+    );
+    this.connection = await lancedb.connect(this.options.uri, undefined, session);
 
     const existing = await this.connection.tableNames();
     if (existing.includes(this.options.tableName)) {

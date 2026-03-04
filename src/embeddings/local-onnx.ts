@@ -47,7 +47,11 @@ export class LocalOnnxEmbedder {
     }
 
     this.extractor = await pipeline("feature-extraction", this.options.model, {
-      dtype: "fp32",
+      dtype: "q8",
+      session_options: {
+        intraOpNumThreads: 2,
+        interOpNumThreads: 1,
+      },
     });
 
     return this.extractor;

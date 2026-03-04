@@ -33,10 +33,15 @@ export interface WorkerEmbeddingProviderOptions {
   cacheDir?: string;
   fallbackToMock?: boolean;
   forceOnnxInitFailure?: boolean;
+  /** Terminate the worker after this many ms of inactivity. 0 = never. Default 60_000. */
+  idleTimeoutMs?: number;
 }
 
 /**
- * Embedding provider backed by a worker thread.
+ * Embedding provider backed by a lazily-spawned worker thread.
+ *
+ * The worker is created on first embed request and terminated after an idle
+ * timeout to release the ONNX model memory (~100-150 MB).
  *
  * Priority queue:
  * - 0: search queries (latency-sensitive)
@@ -46,9 +51,17 @@ export class WorkerEmbeddingProvider implements EmbeddingRuntimeProvider {
   modelId: string;
   readonly dimensions: number;
 
-  private readonly worker: Worker;
   private readonly maxPendingIndexJobs: number;
+  private readonly workerOptions: {
+    backend: "mock" | "onnx";
+    model: string;
+    cacheDir?: string;
+    fallbackToMock: boolean;
+    forceOnnxInitFailure: boolean;
+  };
+  private readonly idleTimeoutMs: number;
 
+  private worker: Worker | null = null;
   private queue: Job[] = [];
   private currentJob: Job | null = null;
   private nextId = 1;
@@ -56,34 +69,25 @@ export class WorkerEmbeddingProvider implements EmbeddingRuntimeProvider {
 
   private ready = false;
   private readyWarning?: string;
+  private idleTimer: ReturnType<typeof setTimeout> | null = null;
+  private closed = false;
 
   constructor(options: WorkerEmbeddingProviderOptions = {}) {
     this.dimensions = options.dimensions ?? 128;
     this.maxPendingIndexJobs = Math.max(1, options.maxPendingIndexJobs ?? 2);
+    this.idleTimeoutMs = options.idleTimeoutMs ?? 60_000;
 
     const backend = options.backend ?? "mock";
     const model = options.model ?? "Xenova/all-MiniLM-L6-v2";
     this.modelId = backend === "onnx" ? `local-onnx/${model}` : "local-mock/worker";
 
-    const workerUrl = new URL("./worker-thread.ts", import.meta.url);
-    this.worker = new Worker(workerUrl, {
-      workerData: {
-        dimensions: this.dimensions,
-        backend,
-        model,
-        cacheDir: options.cacheDir,
-        fallbackToMock: options.fallbackToMock ?? true,
-        forceOnnxInitFailure: options.forceOnnxInitFailure ?? false,
-      },
-    });
-
-    this.worker.on("message", (msg) => this.onWorkerMessage(msg as WorkerMessage));
-    this.worker.on("error", (err) => this.failCurrentJob(err));
-    this.worker.on("exit", (code) => {
-      if (code !== 0) {
-        this.failCurrentJob(new Error(`Embedding worker exited with code ${code}`));
-      }
-    });
+    this.workerOptions = {
+      backend,
+      model,
+      cacheDir: options.cacheDir,
+      fallbackToMock: options.fallbackToMock ?? true,
+      forceOnnxInitFailure: options.forceOnnxInitFailure ?? false,
+    };
   }
 
   async embed(texts: string[]): Promise<Float32Array[]> {
@@ -91,9 +95,15 @@ export class WorkerEmbeddingProvider implements EmbeddingRuntimeProvider {
   }
 
   async embedWithPriority(texts: string[], priority: EmbedPriority): Promise<Float32Array[]> {
+    if (this.closed) throw new Error("WorkerEmbeddingProvider is closed");
+
+    this.clearIdleTimer();
+
     if (priority === 1) {
       await this.waitForIndexQueueCapacity();
     }
+
+    this.ensureWorker();
 
     return new Promise<Float32Array[]>((resolve, reject) => {
       const job: Job = {
@@ -119,7 +129,59 @@ export class WorkerEmbeddingProvider implements EmbeddingRuntimeProvider {
   }
 
   async close(): Promise<void> {
-    await this.worker.terminate();
+    this.closed = true;
+    this.clearIdleTimer();
+    await this.terminateWorker();
+  }
+
+  private ensureWorker(): void {
+    if (this.worker) return;
+
+    const workerUrl = new URL("./worker-thread.ts", import.meta.url);
+    this.worker = new Worker(workerUrl, {
+      workerData: {
+        dimensions: this.dimensions,
+        ...this.workerOptions,
+      },
+    });
+
+    this.ready = false;
+
+    this.worker.on("message", (msg) => this.onWorkerMessage(msg as WorkerMessage));
+    this.worker.on("error", (err) => this.failCurrentJob(err));
+    this.worker.on("exit", (code) => {
+      if (code !== 0 && this.currentJob) {
+        this.failCurrentJob(new Error(`Embedding worker exited with code ${code}`));
+      }
+      this.worker = null;
+      this.ready = false;
+    });
+  }
+
+  private async terminateWorker(): Promise<void> {
+    if (!this.worker) return;
+    const w = this.worker;
+    this.worker = null;
+    this.ready = false;
+    await w.terminate();
+  }
+
+  private resetIdleTimer(): void {
+    this.clearIdleTimer();
+    if (this.idleTimeoutMs <= 0) return;
+
+    this.idleTimer = setTimeout(() => {
+      if (!this.isBusy() && this.worker) {
+        this.terminateWorker().catch(() => {});
+      }
+    }, this.idleTimeoutMs);
+  }
+
+  private clearIdleTimer(): void {
+    if (this.idleTimer) {
+      clearTimeout(this.idleTimer);
+      this.idleTimer = null;
+    }
   }
 
   private schedule(): void {
@@ -127,7 +189,7 @@ export class WorkerEmbeddingProvider implements EmbeddingRuntimeProvider {
 
     const job = this.queue.shift()!;
     this.currentJob = job;
-    this.worker.postMessage({ id: job.id, texts: job.texts });
+    this.worker!.postMessage({ id: job.id, texts: job.texts });
   }
 
   private onWorkerMessage(msg: WorkerMessage): void {
@@ -155,6 +217,11 @@ export class WorkerEmbeddingProvider implements EmbeddingRuntimeProvider {
 
     this.notifyQueueWaiter();
     this.schedule();
+
+    // Start idle timer when queue drains
+    if (!this.isBusy()) {
+      this.resetIdleTimer();
+    }
   }
 
   private failCurrentJob(error: Error): void {
