@@ -272,6 +272,17 @@ function formatStatus(status: Awaited<ReturnType<Engine["status"]>>): string {
     );
   }
 
+  // ── Process diagnostics ──
+  const mem = process.memoryUsage();
+  const mb = (bytes: number) => `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+  const native = mem.rss - mem.heapUsed - mem.external;
+  lines.push("");
+  lines.push("Process diagnostics:");
+  lines.push(`  PID: ${process.pid}`);
+  lines.push(`  Uptime: ${(process.uptime() / 60).toFixed(1)} min`);
+  lines.push(`  Memory: rss=${mb(mem.rss)}, heap=${mb(mem.heapUsed)}/${mb(mem.heapTotal)}, external=${mb(mem.external)}, native≈${mb(native)}`);
+  lines.push(`  Bun version: ${typeof Bun !== "undefined" ? Bun.version : "n/a"}`);
+
   return lines.join("\n");
 }
 
