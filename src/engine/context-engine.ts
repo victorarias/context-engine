@@ -352,7 +352,7 @@ export class ContextEngine implements Engine {
     const blob = entry ? await this.metadataStore.getBlob(entry.blobHash) : null;
     const indexedChunkCount = blob?.chunkIds.length ?? dirtyEntry?.chunkIds.length ?? 0;
 
-    const resolved = this.resolveFileOnDisk(summaryPath);
+    const resolved = this.resolveIndexedFileOnDisk(summaryPath);
     const liveStructure = resolved ? this.deriveLiveFileStructure(summaryPath, resolved) : null;
 
     if (!entry && !dirtyEntry && !liveStructure) {
@@ -2643,6 +2643,17 @@ export class ContextEngine implements Engine {
     } catch {
       return null;
     }
+  }
+
+  private resolveIndexedFileOnDisk(filePath: string): string | null {
+    const normalized = normalizeFilePath(filePath);
+
+    for (const root of this.indexedRoots) {
+      const candidate = resolve(root, normalized);
+      if (existsSync(candidate)) return candidate;
+    }
+
+    return null;
   }
 
   private resolveFileOnDisk(filePath: string): string | null {

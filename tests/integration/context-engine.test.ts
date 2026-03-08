@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import process from "node:process";
 import { TempDir } from "../harness/temp-dir.js";
 import { ConfigSchema } from "../../src/config.js";
 import { ContextEngine } from "../../src/engine/context-engine.js";
@@ -153,6 +154,49 @@ func (m *DeliveryManager) SendNow(ctx context.Context) error {
     expect(summary).toContain("SendNow");
 
     await engine.close();
+  });
+
+  it("keeps live fallback scoped to indexed roots", async () => {
+    const tmp = TempDir.create("ce-engine-summary-scope");
+    dirs.push(tmp);
+
+    const repoDir = join(tmp.path, "repo");
+    const sourceDir = join(repoDir, "src");
+    mkdirSync(sourceDir, { recursive: true });
+
+    writeFileSync(join(repoDir, "README.md"), "# Outside source root\n");
+    writeFileSync(
+      join(sourceDir, "inside.go"),
+      `package inside
+
+func Run() {}
+`,
+    );
+
+    const previousCwd = process.cwd();
+    process.chdir(repoDir);
+
+    try {
+      const config = ConfigSchema.parse({
+        sources: [{ path: sourceDir }],
+        dataDir: join(tmp.path, "data"),
+        embedding: {
+          provider: "local",
+          localBackend: "mock",
+          dimensions: 768,
+        },
+      });
+
+      const engine = await ContextEngine.create(config);
+      await engine.index();
+
+      const summary = await engine.getFileSummary("README.md");
+      expect(summary).toBe("File not indexed: README.md");
+
+      await engine.close();
+    } finally {
+      process.chdir(previousCwd);
+    }
   });
 
   it("supports semantic_search language/path filters to avoid noisy docs", async () => {
