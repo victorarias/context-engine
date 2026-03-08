@@ -159,7 +159,7 @@ Once connected, your agent gets access to these tools:
 | **`semantic_search`** | Natural-language search over your codebase. Find code by intent, not keywords (with optional file/language filters like `*.go` and `codeOnly=true` for code-focused results). |
 | **`find_files`** | Find files by glob or substring, scoped to the index. |
 | **`get_symbols`** | Look up function/class/type definitions by name, kind, or file. |
-| **`get_file_summary`** | Quick structural overview of a file (chunks, symbols) without reading it. |
+| **`get_file_summary`** | Quick structural overview of a file in a stable sectioned format (`[file]`, `[index]`, `[context]`, `[imports]`, `[derived]`, `[symbols]`): line count, language, index state, package/module hint, top-level doc comment, imports, and chunks/symbols from the index — with live-file fallback when stored metadata is missing. |
 | **`get_recent_changes`** | Summarize recent git commits and changed files, optionally filtered by topic. |
 | **`get_dependencies`** | Extract import dependencies for a file or directory (TS/JS/Go/Python/Rust/Kotlin). |
 | **`find_importers`** | Reverse dependency lookup — which files import a given target. |
