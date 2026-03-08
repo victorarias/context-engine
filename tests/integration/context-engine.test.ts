@@ -62,12 +62,95 @@ describe("ContextEngine", () => {
     expect(symbols.length).toBeGreaterThan(0);
 
     const summary = await engine.getFileSummary(files.find((f) => f.endsWith("session.ts"))!);
+    expect(summary).toContain("File summary for");
+    expect(summary).toContain("[file]");
+    expect(summary).toContain("[index]");
+    expect(summary).toContain("[symbols]");
     expect(summary).toContain("File:");
+    expect(summary).toContain("Language: typescript");
+    expect(summary).toContain("Index state: indexed");
+    expect(summary).toContain("Symbols source: indexed");
     expect(summary).toContain("Symbols:");
 
     const results = await engine.search("authenticate user", { limit: 5 });
     expect(results.length).toBeGreaterThan(0);
     expect(results.some((r) => r.filePath.endsWith("auth.ts"))).toBe(true);
+
+    await engine.close();
+  });
+
+  it("falls back to live file structure when indexed metadata is missing", async () => {
+    const tmp = TempDir.create("ce-engine-summary-fallback");
+    dirs.push(tmp);
+
+    const sourceDir = join(tmp.path, "repo", "src");
+    mkdirSync(sourceDir, { recursive: true });
+
+    writeFileSync(
+      join(sourceDir, "delivery.go"),
+      `// DeliveryManager handles Telegram message delivery.
+package telegram
+
+import (
+  "context"
+  "net/http"
+)
+
+type DeliveryManager struct{}
+
+func (m *DeliveryManager) SendNow(ctx context.Context) error {
+  _ = http.MethodPost
+  return nil
+}
+`,
+    );
+
+    const config = ConfigSchema.parse({
+      sources: [{ path: sourceDir }],
+      dataDir: join(tmp.path, "data"),
+      embedding: {
+        provider: "local",
+        localBackend: "mock",
+        dimensions: 768,
+      },
+    });
+
+    const engine = await ContextEngine.create(config);
+    await engine.index();
+
+    const metadataStore = (engine as any).metadataStore as SQLiteMetadataStore;
+    const worktreeId = (engine as any).primaryWorktreeId as string;
+    const entries = await metadataStore.getTreeEntries(worktreeId);
+    const entry = entries.find((item) => item.path === "delivery.go");
+
+    expect(entry).toBeDefined();
+
+    await metadataStore.deleteBlob(entry!.blobHash);
+    await metadataStore.deleteSymbolsByFile("delivery.go");
+
+    const summary = await engine.getFileSummary("delivery.go");
+    expect(summary).toContain("File summary for delivery.go");
+    expect(summary).toContain("[file]");
+    expect(summary).toContain("[index]");
+    expect(summary).toContain("[context]");
+    expect(summary).toContain("[imports]");
+    expect(summary).toContain("[derived]");
+    expect(summary).toContain("[symbols]");
+    expect(summary).toContain("Language: go");
+    expect(summary).toContain("Index state: manifest-only");
+    expect(summary).toContain("Chunks: 0");
+    expect(summary).toContain("Symbols: 0");
+    expect(summary).toContain("Package: telegram");
+    expect(summary).toContain("Doc: DeliveryManager handles Telegram message delivery.");
+    expect(summary).toContain("Imports (up to 8):");
+    expect(summary).toContain("- context");
+    expect(summary).toContain("- net/http");
+    expect(summary).toContain("Index note:");
+    expect(summary).toContain("Derived chunks:");
+    expect(summary).toContain("Derived symbols:");
+    expect(summary).toContain("Symbols source: derived");
+    expect(summary).toContain("DeliveryManager");
+    expect(summary).toContain("SendNow");
 
     await engine.close();
   });

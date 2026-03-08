@@ -344,35 +344,87 @@ export class ContextEngine implements Engine {
 
     const entry = tree.find((e) => pathMatch(e.path, normalized));
     const dirtyEntry = dirty.find((e) => pathMatch(e.path, normalized));
+    const summaryPath = entry?.path ?? dirtyEntry?.path ?? normalized;
 
-    if (!entry && !dirtyEntry) {
+    const indexedSymbols = (entry || dirtyEntry)
+      ? await this.metadataStore.getSymbols({ filePath: summaryPath, repoId: this.repoId })
+      : [];
+    const blob = entry ? await this.metadataStore.getBlob(entry.blobHash) : null;
+    const indexedChunkCount = blob?.chunkIds.length ?? dirtyEntry?.chunkIds.length ?? 0;
+
+    const resolved = this.resolveFileOnDisk(summaryPath);
+    const liveStructure = resolved ? this.deriveLiveFileStructure(summaryPath, resolved) : null;
+
+    if (!entry && !dirtyEntry && !liveStructure) {
       return `File not indexed: ${filePath}`;
     }
 
-    const summaryPath = entry?.path ?? dirtyEntry!.path;
-    const symbols = await this.metadataStore.getSymbols({ filePath: summaryPath, repoId: this.repoId });
-    const blob = entry ? await this.metadataStore.getBlob(entry.blobHash) : null;
+    const lineCount = liveStructure?.lineCount ?? "unknown";
+    const language = liveStructure?.language ?? inferLanguageFromPath(summaryPath);
+    const indexState = classifyFileSummaryIndexState({
+      hasTrackedEntry: !!entry,
+      hasDirtyEntry: !!dirtyEntry,
+      indexedChunkCount,
+      indexedSymbolCount: indexedSymbols.length,
+    });
 
-    const resolved = this.resolveFileOnDisk(summaryPath);
-    let lineCount = 0;
-    if (resolved && existsSync(resolved)) {
-      try {
-        lineCount = readFileSync(resolved, "utf-8").split(/\r?\n/).length;
-      } catch {
-        lineCount = 0;
+    const lines: string[] = [
+      `File summary for ${summaryPath}`,
+      "[file]",
+      `File: ${summaryPath}`,
+      `Lines: ${lineCount}`,
+      `Language: ${language}`,
+      "",
+      "[index]",
+      `Index state: ${indexState}`,
+      `Chunks: ${indexedChunkCount}`,
+      `Symbols: ${indexedSymbols.length}`,
+    ];
+
+    if (liveStructure?.packageHint || liveStructure?.topLevelDoc) {
+      lines.push("", "[context]");
+      if (liveStructure?.packageHint) {
+        lines.push(`${liveStructure.packageHint.label}: ${liveStructure.packageHint.value}`);
+      }
+      if (liveStructure?.topLevelDoc) {
+        lines.push(`Doc: ${truncateSummaryField(liveStructure.topLevelDoc, 220)}`);
       }
     }
 
-    const lines: string[] = [
-      `File: ${summaryPath}`,
-      `Lines: ${lineCount > 0 ? lineCount : "unknown"}`,
-      `Chunks: ${blob?.chunkIds.length ?? dirtyEntry?.chunkIds.length ?? 0}`,
-      `Symbols: ${symbols.length}`,
-    ];
+    if (liveStructure?.imports.length) {
+      lines.push("", "[imports]", "Imports (up to 8):");
+      for (const importValue of liveStructure.imports.slice(0, 8)) {
+        lines.push(`- ${importValue}`);
+      }
+    }
 
-    if (symbols.length) {
-      lines.push("Symbols (up to 8):");
-      for (const sym of symbols.slice(0, 8)) {
+    if (liveStructure && (!entry && !dirtyEntry)) {
+      lines.push(
+        "",
+        "[derived]",
+        "Index note: file is inside the source roots but is not currently indexed; derived structure below comes from the current file content.",
+        `Derived chunks: ${liveStructure.chunkCount}`,
+        `Derived symbols: ${liveStructure.symbols.length}`,
+      );
+    } else if (liveStructure && (indexedChunkCount === 0 || indexedSymbols.length === 0)) {
+      lines.push(
+        "",
+        "[derived]",
+        "Index note: stored structural metadata is missing or incomplete; derived structure below comes from the current file content.",
+      );
+      if (indexedChunkCount === 0) {
+        lines.push(`Derived chunks: ${liveStructure.chunkCount}`);
+      }
+      if (indexedSymbols.length === 0) {
+        lines.push(`Derived symbols: ${liveStructure.symbols.length}`);
+      }
+    }
+
+    const symbolsToDisplay = indexedSymbols.length > 0 ? indexedSymbols : (liveStructure?.symbols ?? []);
+    if (symbolsToDisplay.length) {
+      lines.push("", "[symbols]", `Symbols source: ${indexedSymbols.length > 0 ? "indexed" : "derived"}`);
+      lines.push(indexedSymbols.length > 0 ? "Symbols (up to 8):" : "Symbols (derived from current file, up to 8):");
+      for (const sym of symbolsToDisplay.slice(0, 8)) {
         lines.push(`- ${sym.kind} ${sym.name} (${sym.startLine}-${sym.endLine})`);
       }
     }
@@ -2554,6 +2606,45 @@ export class ContextEngine implements Engine {
     return normalized;
   }
 
+  private deriveLiveFileStructure(
+    filePath: string,
+    absolutePath: string,
+  ): {
+    lineCount: number;
+    chunkCount: number;
+    symbols: SymbolInfo[];
+    language: string;
+    packageHint: { label: string; value: string } | null;
+    imports: string[];
+    topLevelDoc: string | null;
+  } | null {
+    try {
+      const content = readFileSync(absolutePath, "utf-8");
+      if (content.includes("\u0000")) {
+        return null;
+      }
+
+      const language = inferLanguageFromPath(filePath);
+      const chunks = this.chunker.chunk(content, filePath, language, this.repoId);
+      const symbols = mergeSymbols(
+        chunksToSymbols(chunks, this.repoId),
+        extractSymbols(content, filePath, this.repoId),
+      );
+
+      return {
+        lineCount: content.split(/\r?\n/).length,
+        chunkCount: chunks.length,
+        symbols,
+        language,
+        packageHint: extractPackageHint(content, filePath, language),
+        imports: extractImportHints(content, language),
+        topLevelDoc: extractTopLevelDocComment(content, language),
+      };
+    } catch {
+      return null;
+    }
+  }
+
   private resolveFileOnDisk(filePath: string): string | null {
     const normalized = normalizeFilePath(filePath);
 
@@ -2572,6 +2663,298 @@ export class ContextEngine implements Engine {
 
 function normalizeFilePath(path: string): string {
   return path.replaceAll("\\", "/").replace(/^\.\//, "");
+}
+
+function inferLanguageFromPath(path: string): string {
+  const ext = extname(path).toLowerCase();
+  switch (ext) {
+    case ".ts":
+    case ".tsx":
+      return "typescript";
+    case ".js":
+    case ".jsx":
+      return "javascript";
+    case ".py":
+      return "python";
+    case ".go":
+      return "go";
+    case ".rs":
+      return "rust";
+    case ".kt":
+    case ".kts":
+      return "kotlin";
+    case ".java":
+      return "java";
+    case ".c":
+    case ".h":
+      return "c";
+    case ".cpp":
+    case ".hpp":
+    case ".cc":
+      return "cpp";
+    case ".md":
+      return "markdown";
+    case ".json":
+      return "json";
+    default:
+      return "text";
+  }
+}
+
+function classifyFileSummaryIndexState(input: {
+  hasTrackedEntry: boolean;
+  hasDirtyEntry: boolean;
+  indexedChunkCount: number;
+  indexedSymbolCount: number;
+}): string {
+  const hasChunks = input.indexedChunkCount > 0;
+  const hasSymbols = input.indexedSymbolCount > 0;
+
+  if (input.hasDirtyEntry) {
+    if (hasChunks && hasSymbols) return "dirty-overlay";
+    if (!hasChunks && !hasSymbols) return "dirty-overlay-unstructured";
+    return "dirty-overlay-incomplete";
+  }
+
+  if (input.hasTrackedEntry) {
+    if (hasChunks && hasSymbols) return "indexed";
+    if (!hasChunks && !hasSymbols) return "manifest-only";
+    return "indexed-incomplete";
+  }
+
+  return "live-file-not-indexed";
+}
+
+function truncateSummaryField(value: string, maxLength: number): string {
+  const normalized = value.replace(/\s+/g, " ").trim();
+  if (normalized.length <= maxLength) return normalized;
+  return `${normalized.slice(0, Math.max(0, maxLength - 1)).trimEnd()}…`;
+}
+
+function extractPackageHint(content: string, filePath: string, language: string): { label: string; value: string } | null {
+  if (language === "go" || language === "kotlin" || language === "java") {
+    const match = content.match(/^\s*package\s+([A-Za-z0-9_.]+)\b/m);
+    if (match?.[1]) {
+      return { label: "Package", value: match[1] };
+    }
+  }
+
+  if (language === "python") {
+    const normalized = normalizeFilePath(filePath);
+    let moduleName = normalized;
+
+    if (moduleName === "__init__.py") {
+      moduleName = "";
+    } else if (moduleName.endsWith("/__init__.py")) {
+      moduleName = moduleName.slice(0, -"/__init__.py".length);
+    } else if (moduleName.endsWith(".py")) {
+      moduleName = moduleName.slice(0, -".py".length);
+    }
+
+    moduleName = moduleName.replaceAll("/", ".").replace(/^\.+|\.+$/g, "");
+    if (moduleName) {
+      return { label: "Module", value: moduleName };
+    }
+  }
+
+  return null;
+}
+
+function extractImportHints(content: string, language: string): string[] {
+  const imports: string[] = [];
+
+  const push = (value: string) => {
+    const normalized = value.trim();
+    if (normalized) imports.push(normalized);
+  };
+
+  if (language === "typescript" || language === "javascript") {
+    for (const match of content.matchAll(/^\s*import\s+[^\n]*?from\s+["']([^"']+)["']/gm)) {
+      push(match[1] ?? "");
+    }
+    for (const match of content.matchAll(/^\s*import\s+["']([^"']+)["']/gm)) {
+      push(match[1] ?? "");
+    }
+    for (const match of content.matchAll(/\brequire\(\s*["']([^"']+)["']\s*\)/g)) {
+      push(match[1] ?? "");
+    }
+  } else if (language === "python") {
+    for (const match of content.matchAll(/^\s*from\s+([.A-Za-z0-9_]+)\s+import\s+/gm)) {
+      push(match[1] ?? "");
+    }
+    for (const match of content.matchAll(/^\s*import\s+([^\n#]+)/gm)) {
+      const clause = match[1] ?? "";
+      for (const part of clause.split(",")) {
+        const name = (part.split(/\s+as\s+/i)[0] ?? "").trim();
+        if (name) push(name);
+      }
+    }
+  } else if (language === "go") {
+    let inBlock = false;
+    for (const rawLine of content.split(/\r?\n/)) {
+      const line = rawLine.trim();
+      if (!inBlock && /^import\s*\($/.test(line)) {
+        inBlock = true;
+        continue;
+      }
+      if (inBlock) {
+        if (line === ")") {
+          inBlock = false;
+          continue;
+        }
+        const match = line.match(/^(?:[A-Za-z_][\w]*\s+)?"([^"]+)"$/);
+        if (match?.[1]) push(match[1]);
+        continue;
+      }
+      const match = line.match(/^import\s+(?:[A-Za-z_][\w]*\s+)?"([^"]+)"$/);
+      if (match?.[1]) push(match[1]);
+    }
+  } else if (language === "rust") {
+    for (const match of content.matchAll(/^\s*use\s+([^;]+);/gm)) {
+      push(match[1] ?? "");
+    }
+    for (const match of content.matchAll(/^\s*mod\s+([A-Za-z_][\w]*)\s*;/gm)) {
+      push(`mod ${match[1] ?? ""}`);
+    }
+  } else if (language === "kotlin" || language === "java") {
+    for (const match of content.matchAll(/^\s*import\s+([A-Za-z0-9_.*]+)\s*;?\s*$/gm)) {
+      push(match[1] ?? "");
+    }
+  } else if (language === "c" || language === "cpp") {
+    for (const match of content.matchAll(/^\s*#include\s+[<"]([^>"]+)[>"]/gm)) {
+      push(match[1] ?? "");
+    }
+  }
+
+  return Array.from(new Set(imports));
+}
+
+function extractTopLevelDocComment(content: string, language: string): string | null {
+  if (language === "python") {
+    const pythonDoc = extractPythonModuleDocstring(content);
+    if (pythonDoc) return pythonDoc;
+  }
+
+  return extractLeadingCommentBlock(content);
+}
+
+function extractPythonModuleDocstring(content: string): string | null {
+  const lines = content.split(/\r?\n/);
+  let index = 0;
+
+  while (index < lines.length) {
+    const trimmed = (lines[index] ?? "").trim();
+    if (!trimmed) {
+      index += 1;
+      continue;
+    }
+    if (index === 0 && trimmed.startsWith("#!")) {
+      index += 1;
+      continue;
+    }
+    if (/^#.*coding[:=]/i.test(trimmed) || trimmed.startsWith("#")) {
+      index += 1;
+      continue;
+    }
+    break;
+  }
+
+  const firstLine = lines[index] ?? "";
+  const quoteMatch = firstLine.match(/^\s*(["']{3})/);
+  if (!quoteMatch?.[1]) {
+    return null;
+  }
+
+  const quote = quoteMatch[1];
+  const startColumn = firstLine.indexOf(quote);
+  const rest = firstLine.slice(startColumn + quote.length);
+  const inlineEnd = rest.indexOf(quote);
+  if (inlineEnd >= 0) {
+    return cleanDocText(rest.slice(0, inlineEnd));
+  }
+
+  const parts = [rest];
+  for (let i = index + 1; i < lines.length; i++) {
+    const line = lines[i] ?? "";
+    const end = line.indexOf(quote);
+    if (end >= 0) {
+      parts.push(line.slice(0, end));
+      return cleanDocText(parts.join("\n"));
+    }
+    parts.push(line);
+  }
+
+  return cleanDocText(parts.join("\n"));
+}
+
+function extractLeadingCommentBlock(content: string): string | null {
+  const text = content.replace(/^\uFEFF/, "");
+  const lines = text.split(/\r?\n/);
+  let index = 0;
+
+  if ((lines[0] ?? "").startsWith("#!")) {
+    index = 1;
+  }
+
+  while (index < lines.length && !(lines[index] ?? "").trim()) {
+    index += 1;
+  }
+
+  const line = lines[index] ?? "";
+  const trimmed = line.trim();
+
+  if (trimmed.startsWith("//")) {
+    const parts: string[] = [];
+    while (index < lines.length) {
+      const current = (lines[index] ?? "").trim();
+      if (!current.startsWith("//")) break;
+      parts.push(current.replace(/^\/\/\s?/, ""));
+      index += 1;
+    }
+    return cleanDocText(parts.join("\n"));
+  }
+
+  if (trimmed.startsWith("#")) {
+    const parts: string[] = [];
+    while (index < lines.length) {
+      const current = (lines[index] ?? "").trim();
+      if (!current.startsWith("#")) break;
+      parts.push(current.replace(/^#\s?/, ""));
+      index += 1;
+    }
+    return cleanDocText(parts.join("\n"));
+  }
+
+  if (trimmed.startsWith("/*")) {
+    const parts: string[] = [];
+    let currentIndex = index;
+    while (currentIndex < lines.length) {
+      const current = lines[currentIndex] ?? "";
+      parts.push(current);
+      if (current.includes("*/")) break;
+      currentIndex += 1;
+    }
+
+    return cleanDocText(
+      parts.join("\n")
+        .replace(/^\s*\/\*/, "")
+        .replace(/\*\/\s*$/, "")
+        .replace(/^\s*\*\s?/gm, ""),
+    );
+  }
+
+  return null;
+}
+
+function cleanDocText(value: string): string | null {
+  const normalized = value
+    .replace(/\r/g, "")
+    .split("\n")
+    .map((line) => line.trim())
+    .join("\n")
+    .trim();
+
+  return normalized ? normalized : null;
 }
 
 function matchesPattern(file: string, pattern: string): boolean {
